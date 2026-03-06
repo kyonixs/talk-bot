@@ -30,7 +30,7 @@ class GeminiService:
         )
 
         try:
-            response = self.client.models.generate_content(
+            response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -69,7 +69,7 @@ class GeminiService:
                 )
             )
 
-            response = self.client.models.generate_content(
+            response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(

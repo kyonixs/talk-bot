@@ -2,7 +2,6 @@ import os
 import discord
 from discord.ext import commands, tasks
 import datetime
-from tzlocal import get_localzone
 
 from config.characters import CHARACTERS
 from services.gemini_service import GeminiService
@@ -10,7 +9,7 @@ from services.gemini_service import GeminiService
 class NewsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.gemini = GeminiService()
+        self.gemini = GeminiService(bot.gemini_api_key)
         
         # 環境変数からチャンネルIDを取得
         self.channel_id = int(os.getenv("CHANNEL_ID", 0))
@@ -69,6 +68,10 @@ class NewsCog(commands.Cog):
                 )
                 
                 # Embedの作成
+                # Embed の description は4096文字制限
+                if len(content) > 4096:
+                    content = content[:4093] + "..."
+
                 embed = discord.Embed(
                     description=content,
                     color=char_data["color"],
