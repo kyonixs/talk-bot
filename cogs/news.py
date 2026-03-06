@@ -1,5 +1,6 @@
 import os
 import random
+import asyncio
 import discord
 from discord.ext import commands, tasks
 import datetime
@@ -18,6 +19,10 @@ class NewsCog(commands.Cog):
 
         # TZを考慮したスケジュール設定用の時刻オブジェクトを作成
         self.tz = datetime.timezone(datetime.timedelta(hours=9))  # JST固定
+
+        # ランダム雑談で今日すでに話しかけたキャラを記録
+        self._today_chatted = set()  # キャラ名のセット
+        self._today_date = None      # 日付追跡用
 
         # 定時実行タスクの開始
         self.scheduled_news.start()
@@ -86,30 +91,54 @@ class NewsCog(commands.Cog):
 
     @tasks.loop(minutes=90)
     async def random_chat(self):
-        """ランダムなタイミングでキャラクターが自発的に話しかける"""
+        """ランダムなタイミングでキャラクターが自発的に話しかける（8〜21時JST限定）"""
         await self.bot.wait_until_ready()
 
         if not self.channel_id:
             return
 
+        # 現在のJST時刻を取得
+        now_jst = datetime.datetime.now(self.tz)
+
+        # 8:00〜21:00 の範囲外なら何もしない
+        if not (8 <= now_jst.hour < 21):
+            print(f"[ランダム雑談] 時間外のためスキップ ({now_jst.strftime('%H:%M')})")
+            return
+
+        # 日付が変わったら記録をリセット
+        today = now_jst.date()
+        if self._today_date != today:
+            self._today_chatted = set()
+            self._today_date = today
+
+        # 30%の確率で発火
+        if random.random() > 0.30:
+            return
+
+        # まだ今日話していないキャラだけを候補にする
+        available_chars = [
+            c for c in CHARACTERS.values()
+            if c["name"] not in self._today_chatted
+        ]
+        if not available_chars:
+            print("[ランダム雑談] 全キャラが今日すでに発言済み。スキップ。")
+            return
+
+        # ランダムにキャラクターを1人選ぶ
+        char_data = random.choice(available_chars)
+        print(f"[ランダム雑談] {char_data['name']} が話しかけます...")
+
         channel = self.bot.get_channel(self.channel_id)
         if not channel:
             return
 
-        # 30%の確率で発火（平均4.5時間に1回程度）
-        if random.random() > 0.30:
-            return
-
-        # ランダムにキャラクターを1人選ぶ
-        char_data = random.choice(list(CHARACTERS.values()))
-        print(f"[ランダム雑談] {char_data['name']} が話しかけます...")
-
         try:
-            # 雑談用のプロンプトを生成
+            # 雑談用のプロンプト（自然な口調を誘導）
             prompts = [
-                "友達に軽く話しかけるように、最近気になったことや雑談のきっかけになるような一言（2〜3文、100文字以内）を書いてください。ニュースではなく日常の雑談です。",
-                "友達のグループチャットで、ふと思いついたことをつぶやくように、軽い一言（2〜3文、100文字以内）を書いてください。",
-                "暇なときに友達に話しかけるような感じで、最近ハマっていることや気になっていることについて軽く一言（2〜3文、100文字以内）つぶやいてください。",
+                "「そういえばさ〜」みたいな感じで、最近気になったことや面白い話を友達にふと話しかけるように1〜2文（80文字以内）で書いて。ニュース紹介ではなく日常のひとこと。",
+                "「ちょっと聞いてよ〜」みたいなノリで、友達のグループチャットにふと思いついたことを投げかけるように1〜2文（80文字以内）で書いて。",
+                "「ねぇ知ってる？」みたいな感じで、最近知ったこととか気になってることを友達に軽く共有するように1〜2文（80文字以内）で書いて。",
+                "「あ〜暇だな〜」みたいなテンションで、友達にどうでもいい雑談を振るような1〜2文（80文字以内）を書いて。",
             ]
             prompt = random.choice(prompts)
 
@@ -120,6 +149,10 @@ class NewsCog(commands.Cog):
             )
 
             await self._send_via_webhook(channel, char_data, response)
+
+            # 今日発言済みとして記録
+            self._today_chatted.add(char_data["name"])
+
         except Exception as e:
             print(f"[ランダム雑談] エラー: {e}")
 
@@ -127,7 +160,6 @@ class NewsCog(commands.Cog):
     async def before_random_chat(self):
         await self.bot.wait_until_ready()
         # 起動直後に発火しないよう、少し待つ
-        import asyncio
         await asyncio.sleep(300)  # 5分待機
 
     # --- コマンド ---
