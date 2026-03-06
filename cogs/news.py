@@ -64,11 +64,10 @@ class NewsCog(commands.Cog):
     # --- 定時ニュース配信（毎日 8:00 / 18:00 JST） ---
 
     @tasks.loop(time=[
-        datetime.time(hour=8, minute=0, tzinfo=datetime.timezone(datetime.timedelta(hours=9))),
-        datetime.time(hour=18, minute=0, tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+        datetime.time(hour=8, minute=0, tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
     ])
     async def scheduled_news(self):
-        """毎日朝8時と夕方18時に定時実行されるタスク"""
+        """毎日朝8時に定時実行されるタスク"""
         await self.bot.wait_until_ready()
         print(f"[{datetime.datetime.now()}] 定時ニュース配信を開始します...")
 
