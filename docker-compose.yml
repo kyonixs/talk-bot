@@ -1,0 +1,16 @@
+services:
+  news-bot:
+    build: .
+    container_name: news-bot
+    restart: always
+    env_file:
+      - .env
+    # e2-microの1GB RAMを考慮したメモリ制限
+    mem_limit: 512m
+    # swapを含めた最大メモリ使用量 (OS側でスワップが設定されている前提)
+    memswap_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
