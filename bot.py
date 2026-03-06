@@ -1,14 +1,7 @@
 import os
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-
-# .envファイルの読み込み
-load_dotenv()
-
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-if not DISCORD_TOKEN:
-    raise ValueError("DISCORD_TOKEN is not set. Please check your .env file.")
+from services.secret_service import get_secret
 
 # Intentsの設定（Message Contentが必須）
 intents = discord.Intents.default()
@@ -23,8 +16,10 @@ class NewsBot(commands.Bot):
             intents=intents,
             help_command=commands.DefaultHelpCommand()
         )
-        # 汎用的にアクセスできるようにServiceをここに持たせることも可能だが、
-        # 今回はCog内でインスタンス化/共有する構成にする
+        
+        # Secret ManagerからAPIキー類を取得
+        print("Fetching secrets from GCP Secret Manager...")
+        self.gemini_api_key = get_secret("GEMINI_API_KEY_SECRET")
 
     async def setup_hook(self):
         # 起動時にCogを読み込む
@@ -43,5 +38,9 @@ class NewsBot(commands.Bot):
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!help"))
 
 if __name__ == "__main__":
+    
+    print("Initializing bot...")
+    discord_token = get_secret("DISCORD_TOKEN_SECRET")
+    
     bot = NewsBot()
-    bot.run(DISCORD_TOKEN)
+    bot.run(discord_token)

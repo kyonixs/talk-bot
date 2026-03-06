@@ -57,19 +57,23 @@ git clone <your-repository-url>
 cd news-bot
 ```
 
-### 2. 環境変数の設定
-`.env.example` をコピーして `.env` を作成し、中身を編集します。
-```bash
-cp .env.example .env
-nano .env
-```
+### 2. GCP Secret Manager の設定
+このBotはパスワードを安全に管理するため、**GCP Secret Manager**を利用します。
+`.env` ファイルは使用しません。
 
-`.env` の内容：
-```env
-DISCORD_TOKEN=your_discord_bot_token_here
-GEMINI_API_KEY=your_gemini_api_key_here
-CHANNEL_ID=123456789012345678
-TZ=Asia/Tokyo
+1. [GCPコンソール](https://console.cloud.google.com/) で「Secret Manager」を開き、APIを有効にします。
+2. 以下の2つのシークレットを作成し、値を設定してください。
+   - `DISCORD_TOKEN_SECRET` （Discord Developer Portalで取得したBotのトークン）
+   - `GEMINI_API_KEY_SECRET` （Google AI Studio等で取得したGeminiのAPIキー）
+3. Botを動かすVM（Compute Engine）のサービスアカウントに、**「Secret Manager のシークレット アクセサー」** 権限が付与されていることを確認してください。
+
+### 3. 環境変数の設定 (docker-compose.yml)
+`docker-compose.yml` を開き、以下の `environment` セクションをご自身の環境に合わせて書き換えてください。
+```yaml
+    environment:
+      - CHANNEL_ID=投稿したいチャンネルの数字ID
+      - TZ=Asia/Tokyo
+      - GOOGLE_CLOUD_PROJECT=ご自身のGCPプロジェクトID
 ```
 
 > **注意:** Discord Developer Portal で Botの **`Message Content Intent`** を必ずONにしてください。

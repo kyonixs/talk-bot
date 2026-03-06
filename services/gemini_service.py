@@ -3,11 +3,10 @@ from google import genai
 from google.genai import types
 
 class GeminiService:
-    def __init__(self):
-        # 実行時に環境変数から取得する
-        api_key = os.getenv("GEMINI_API_KEY")
+    def __init__(self, api_key: str):
+        # 実行時に渡されたAPIキーを使用して初期化する
         if not api_key:
-            raise ValueError("GEMINI_API_KEY is not set in environment variables.")
+            raise ValueError("API key must be provided to initialize GeminiService.")
         
         self.client = genai.Client(api_key=api_key)
         self.model_name = "gemini-2.5-flash"
