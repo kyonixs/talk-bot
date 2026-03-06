@@ -1,4 +1,5 @@
 import os
+import random
 import discord
 from discord.ext import commands, tasks
 import datetime
@@ -6,22 +7,56 @@ import datetime
 from config.characters import CHARACTERS
 from services.gemini_service import GeminiService
 
+
 class NewsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.gemini = GeminiService(bot.gemini_api_key)
-        
+
         # 環境変数からチャンネルIDを取得
         self.channel_id = int(os.getenv("CHANNEL_ID", 0))
-        
+
         # TZを考慮したスケジュール設定用の時刻オブジェクトを作成
-        self.tz = datetime.timezone(datetime.timedelta(hours=9)) # JST固定で扱う
-        
+        self.tz = datetime.timezone(datetime.timedelta(hours=9))  # JST固定
+
         # 定時実行タスクの開始
         self.scheduled_news.start()
+        self.random_chat.start()
 
     def cog_unload(self):
         self.scheduled_news.cancel()
+        self.random_chat.cancel()
+
+    async def _get_or_create_webhook(self, channel):
+        """チャンネルに紐づくWebhookを取得（なければ作成）"""
+        webhooks = await channel.webhooks()
+        webhook = discord.utils.get(webhooks, name="NewsBotWebhook")
+        if not webhook:
+            webhook = await channel.create_webhook(name="NewsBotWebhook")
+        return webhook
+
+    async def _send_via_webhook(self, channel, character: dict, content: str):
+        """Webhookを使用してキャラクターになりすましてメッセージを送信する"""
+        try:
+            webhook = await self._get_or_create_webhook(channel)
+            icon_url = character.get("icon_url", None)
+
+            # 2000文字制限に対応
+            chunks = [content[i:i + 2000] for i in range(0, len(content), 2000)]
+            sent_message = None
+            for chunk in chunks:
+                sent_message = await webhook.send(
+                    content=chunk,
+                    username=character["name"],
+                    avatar_url=icon_url,
+                    wait=True  # メッセージオブジェクトを返す（スレッド作成用）
+                )
+            return sent_message
+        except Exception as e:
+            print(f"Webhook send error: {e}")
+            return None
+
+    # --- 定時ニュース配信（毎日 8:00 / 18:00 JST） ---
 
     @tasks.loop(time=[
         datetime.time(hour=8, minute=0, tzinfo=datetime.timezone(datetime.timedelta(hours=9))),
@@ -31,69 +66,104 @@ class NewsCog(commands.Cog):
         """毎日朝8時と夕方18時に定時実行されるタスク"""
         await self.bot.wait_until_ready()
         print(f"[{datetime.datetime.now()}] 定時ニュース配信を開始します...")
-        
+
         if not self.channel_id:
             print("CHANNEL_IDが設定されていません。")
             return
-            
+
         channel = self.bot.get_channel(self.channel_id)
         if not channel:
             print(f"チャンネルID {self.channel_id} が見つかりませんでした。")
             return
-            
+
         await self._send_all_characters_news(channel)
-        
+
     @scheduled_news.before_loop
     async def before_scheduled_news(self):
         await self.bot.wait_until_ready()
+
+    # --- ランダム雑談（キャラクターが自発的に話しかける） ---
+
+    @tasks.loop(minutes=90)
+    async def random_chat(self):
+        """ランダムなタイミングでキャラクターが自発的に話しかける"""
+        await self.bot.wait_until_ready()
+
+        if not self.channel_id:
+            return
+
+        channel = self.bot.get_channel(self.channel_id)
+        if not channel:
+            return
+
+        # 30%の確率で発火（平均4.5時間に1回程度）
+        if random.random() > 0.30:
+            return
+
+        # ランダムにキャラクターを1人選ぶ
+        char_data = random.choice(list(CHARACTERS.values()))
+        print(f"[ランダム雑談] {char_data['name']} が話しかけます...")
+
+        try:
+            # 雑談用のプロンプトを生成
+            prompts = [
+                "友達に軽く話しかけるように、最近気になったことや雑談のきっかけになるような一言（2〜3文、100文字以内）を書いてください。ニュースではなく日常の雑談です。",
+                "友達のグループチャットで、ふと思いついたことをつぶやくように、軽い一言（2〜3文、100文字以内）を書いてください。",
+                "暇なときに友達に話しかけるような感じで、最近ハマっていることや気になっていることについて軽く一言（2〜3文、100文字以内）つぶやいてください。",
+            ]
+            prompt = random.choice(prompts)
+
+            response = await self.gemini.generate_chat_response(
+                personality=char_data["personality"],
+                chat_history=[],
+                user_message=prompt
+            )
+
+            await self._send_via_webhook(channel, char_data, response)
+        except Exception as e:
+            print(f"[ランダム雑談] エラー: {e}")
+
+    @random_chat.before_loop
+    async def before_random_chat(self):
+        await self.bot.wait_until_ready()
+        # 起動直後に発火しないよう、少し待つ
+        import asyncio
+        await asyncio.sleep(300)  # 5分待機
+
+    # --- コマンド ---
 
     @commands.command(name="news")
     async def force_news(self, ctx):
         """手動で全キャラのニュースを配信するコマンド (!news)"""
         await ctx.send("📡 ニュースを取得してくるからちょっと待ってね！")
-        
         await self._send_all_characters_news(ctx.channel)
-        
-        await ctx.send("✅ 配信完了！スレッドで話しかけてみてね！")
+
+    # --- 内部メソッド ---
 
     async def _send_all_characters_news(self, channel):
-        """全キャラクター分のニュースを取得し、チャンネルに投稿してスレッドを作成する"""
+        """全キャラクター分のニュースを取得し、Webhook経由で投稿してスレッドを作成する"""
         for char_key, char_data in CHARACTERS.items():
             try:
-                # ニュース生成（API呼び出しは同期的に行われるため、順次実行）
                 print(f"[{char_data['name']}] 担当ジャンルのニュースを生成中...")
                 content = await self.gemini.generate_news(
                     personality=char_data["personality"],
                     topics=char_data["description"]
                 )
-                
-                # Embedの作成
-                # Embed の description は4096文字制限
-                if len(content) > 4096:
-                    content = content[:4093] + "..."
 
-                embed = discord.Embed(
-                    description=content,
-                    color=char_data["color"],
-                    timestamp=discord.utils.utcnow()
-                )
-                
-                embed.set_author(name=f"{char_data['name']}（{char_data['role']}）")
-                embed.set_footer(text=f"担当: {char_data['description']}")
-                
-                # チャンネルへの送信とスレッドの自動作成
-                message = await channel.send(embed=embed)
-                
-                # スレッド名の生成 (例: "タケシのニュース討論会")
-                thread_name = f"{char_data['name']}と話す💭"
-                
-                await message.create_thread(
-                    name=thread_name,
-                    auto_archive_duration=1440 # 24時間
-                )
-                
+                # Webhook経由でキャラクターとして送信
+                sent_message = await self._send_via_webhook(channel, char_data, content)
+
+                # スレッドの自動作成
+                if sent_message:
+                    thread_name = f"{char_data['name']}と話す💭"
+                    await sent_message.create_thread(
+                        name=thread_name,
+                        auto_archive_duration=1440  # 24時間
+                    )
+
             except Exception as e:
                 print(f"[{char_key}] ニュース配信中にエラーが発生しました: {e}")
-                
+
+
 async def setup(bot):
     await bot.add_cog(NewsCog(bot))
