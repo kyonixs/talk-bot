@@ -82,3 +82,38 @@ class GeminiService:
         except Exception as e:
             print(f"Error calling Gemini API for chat: {e}")
             return "ごめんね、今ちょっと頭回ってないかも。もう一回言ってくれる？"
+
+    async def determine_character(self, user_message: str) -> str:
+        """
+        ユーザーのメッセージ内容から、最も適任なキャラクター名を判定する。
+        """
+        system_instruction = (
+            "あなたはチャットボットのルーターです。ユーザーのメッセージ内容を分析し、以下の4人のうち最も返答に適したキャラクターの名前を1つだけ出力してください。\n"
+            "- タケシ (エンタメ、芸能、スポーツ担当。チャラい)\n"
+            "- アカリ先輩 (国内時事、テクノロジー担当。知的)\n"
+            "- ゆうた (アニメ、ゲーム、サブカル、豆知識担当。オタク)\n"
+            "- れな (美容、恋愛、ファッション、人間関係担当。ギャル)\n\n"
+            "出力ルール:\n"
+            "「タケシ」「アカリ先輩」「ゆうた」「れな」のいずれか1つの文字列のみを出力すること。理由や余計な記号は含めないでください。\n"
+            "どれにも当てはまらない一般的な雑談の場合は、テンションや相性に最も近いものを選んでください。"
+        )
+
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=user_message,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.2, # クリエイティビティは低くして決定論的にする
+                )
+            )
+            result = response.text.strip()
+            
+            valid_names = ["タケシ", "アカリ先輩", "ゆうた", "れな"]
+            for name in valid_names:
+                if name in result:
+                    return name
+            return "タケシ" # デフォルト
+        except Exception as e:
+            print(f"Router Error: {e}")
+            return "タケシ"

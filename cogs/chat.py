@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands
 from collections import OrderedDict
@@ -58,28 +59,71 @@ class ChatCog(commands.Cog):
                 return char_data
         return None
 
-    def _get_target_character(self, message_content: str, thread_name: str = ""):
+    async def _get_target_character(self, message_content: str, thread_name: str = ""):
         """メッセージ内容またはスレッド名からキャラクターを特定する"""
 
-        # 1. スレッド名からの推測 (定時配信で作られたスレッドを想定)
-        if thread_name:
-            char = self._find_character(thread_name)
-            if char:
-                return char
-
-        # 2. メッセージ内でのメンション/名前指定からの推測
+        # 1. メッセージ内での明示的なメンション/名前指定からの推測
         if message_content:
             char = self._find_character(message_content)
             if char:
                 return char
 
-        # デフォルトはタケシ
+        # 2. スレッド名からの推測 (定時配信で作られたスレッドを想定)
+        if thread_name:
+            char = self._find_character(thread_name)
+            if char:
+                return char
+
+        # 3. 指定がない場合はAIルーターによる自動振り分け
+        routed_name = await self.gemini.determine_character(message_content)
+        char = self._find_character(routed_name)
+        if char:
+            return char
+
+        # フォールバック
         return CHARACTERS["タケシ"]
+
+    async def _send_via_webhook(self, channel, character: dict, content: str):
+        """Webhookを使用してキャラクターになりすましてメッセージを送信する"""
+        
+        target_channel = channel.parent if isinstance(channel, discord.Thread) else channel
+        thread = channel if isinstance(channel, discord.Thread) else discord.utils.MISSING
+        
+        try:
+            webhooks = await target_channel.webhooks()
+            webhook = discord.utils.get(webhooks, name="NewsBotWebhook")
+            if not webhook:
+                webhook = await target_channel.create_webhook(name="NewsBotWebhook")
+                
+            icon_url = character.get("icon_url", None)
+            
+            if len(content) <= 2000:
+                await webhook.send(
+                    content=content,
+                    username=character["name"],
+                    avatar_url=icon_url,
+                    thread=thread
+                )
+            else:
+                for i in range(0, len(content), 2000):
+                    await webhook.send(
+                        content=content[i:i + 2000],
+                        username=character["name"],
+                        avatar_url=icon_url,
+                        thread=thread
+                    )
+            return True
+        except discord.Forbidden:
+            print("Webhook creation forbidden. Falling back to normal reply.")
+            return False
+        except Exception as e:
+            print(f"Webhook send error: {e}")
+            return False
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        # Bot自身のメッセージは無視
-        if message.author == self.bot.user:
+        # Bot自身、またはWebhookからのメッセージは無視（無限ループ防止）
+        if message.author.bot or message.webhook_id:
             return
 
         # コマンドの場合はここで処理しない
@@ -88,12 +132,15 @@ class ChatCog(commands.Cog):
 
         is_in_thread = isinstance(message.channel, discord.Thread)
         is_mentioned = self.bot.user in message.mentions
+        
+        target_channel_id = int(os.getenv("CHANNEL_ID", 0))
+        is_in_target_channel = message.channel.id == target_channel_id if not is_in_thread else message.channel.parent_id == target_channel_id
 
-        # Botへのメンション、もしくはBotが作成したスレッド内のメッセージに反応する
+        # 当該チャンネルか、Bot作成スレッド内、またはメンションされたら反応
         should_reply = is_mentioned or (
             is_in_thread and
             message.channel.owner_id == self.bot.user.id
-        )
+        ) or is_in_target_channel
 
         if not should_reply:
             return
@@ -104,8 +151,8 @@ class ChatCog(commands.Cog):
         if not content_clean:
             return
 
-        # キャラクターの特定
-        target_char = self._get_target_character(content_clean, thread_name)
+        # キャラクターの特定 (AI Router 経由)
+        target_char = await self._get_target_character(content_clean, thread_name)
 
         # 会話コンテキストの管理キー
         context_key = message.channel.id
@@ -130,13 +177,17 @@ class ChatCog(commands.Cog):
                 if len(history) > self.MAX_HISTORY * 2:
                     del history[:len(history) - self.MAX_HISTORY * 2]
 
-                # Discord の2000文字制限に対応
-                if len(response_text) <= 2000:
-                    await message.reply(response_text)
-                else:
-                    for i in range(0, len(response_text), 2000):
-                        chunk = response_text[i:i + 2000]
-                        await message.reply(chunk)
+                # Webhookでなりすまし送信
+                success = await self._send_via_webhook(message.channel, target_char, response_text)
+                
+                # Webhookが使えない場合は通常のreplyにフォールバック
+                if not success:
+                    if len(response_text) <= 2000:
+                        await message.reply(response_text)
+                    else:
+                        for i in range(0, len(response_text), 2000):
+                            chunk = response_text[i:i + 2000]
+                            await message.reply(chunk)
 
             except Exception as e:
                 print(f"Chat Cog Error: {e}")
