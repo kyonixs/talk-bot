@@ -210,12 +210,14 @@ class ChatCog(commands.Cog):
                     chat_history=[],
                     user_message=question
                 )
-                # Discord の2000文字制限に対応
-                if len(response_text) <= 2000:
-                    await ctx.send(response_text)
-                else:
-                    for i in range(0, len(response_text), 2000):
-                        await ctx.send(response_text[i:i + 2000])
+                # Webhookでなりすまし送信
+                success = await self._send_via_webhook(ctx.channel, target_char, response_text)
+                if not success:
+                    if len(response_text) <= 2000:
+                        await ctx.send(response_text)
+                    else:
+                        for i in range(0, len(response_text), 2000):
+                            await ctx.send(response_text[i:i + 2000])
             except Exception as e:
                 print(f"Ask Command Error: {e}")
                 await ctx.send("ごめん、今システムエラーみたい。")
@@ -251,8 +253,9 @@ class ChatCog(commands.Cog):
         embed.add_field(
             name="話しかけ方",
             value=(
-                "- ニュース配信のスレッド内で返信する\n"
-                "- Botをメンション + キャラ名で話しかける"
+                "- ニュース配信チャンネル内で自由に発言 → AIが最適なキャラを自動選択\n"
+                "- ニュース配信のスレッド内で返信 → そのスレッドのキャラが応答\n"
+                "- Botをメンションして話しかける"
             ),
             inline=False
         )

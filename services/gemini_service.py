@@ -10,6 +10,7 @@ class GeminiService:
         
         self.client = genai.Client(api_key=api_key)
         self.model_name = "gemini-2.5-flash"
+        self.router_model_name = "gemini-2.0-flash-lite"  # Router用軽量モデル
 
     async def generate_news(self, personality: str, topics: str) -> str:
         """
@@ -47,7 +48,7 @@ class GeminiService:
     async def generate_chat_response(self, personality: str, chat_history: list[dict], user_message: str) -> str:
         """
         スレッドやメンションでの会話用。
-        chat_history: [{"role": "user" or "model", "parts": [{"text": "..."}]}] のリスト形式
+        chat_history: [{"role": "user" or "model", "content": "..."}] のリスト形式
         """
         try:
             # historyの構築
@@ -100,7 +101,7 @@ class GeminiService:
 
         try:
             response = await self.client.aio.models.generate_content(
-                model=self.model_name,
+                model=self.router_model_name,
                 contents=user_message,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
