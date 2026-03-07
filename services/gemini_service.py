@@ -46,6 +46,40 @@ class GeminiService:
             print(f"Error calling Gemini API for news: {e}")
             return "ごめん！ニュース調べるの失敗しちゃったみたい。後でもう一回聞いて！"
 
+    async def generate_random_chat(self, personality: str, topics: str) -> str | None:
+        """
+        ランダム雑談用。Google Search Grounding で最新の話題を1つ拾い、
+        友達にふと話しかけるような自然な雑談メッセージを生成する。
+        """
+        prompt = (
+            f"今日は日本の現在の日付です。Google検索を使って、以下のトピックに関連する最新の話題やニュースを1つだけ調べてください:\n"
+            f"{topics}\n\n"
+            "調べた結果をもとに、友達のグループチャットにふと話しかけるような自然な雑談メッセージを書いてください。\n"
+            "ルール:\n"
+            "- ネタは1つだけピックアップする\n"
+            "- 「そういえばさ〜」「ちょっと聞いてよ」「ねぇ知ってる？」のような自然な切り出し方をする\n"
+            "- 「今日のニュースは」「本日のトピックは」のようなアナウンサー的な言い回しは絶対に使わない\n"
+            "- 友達にLINEで話しかけるようなテンポ感で、1〜3文で書く\n"
+            "- **全体で100〜200文字に収めること（厳守）**\n"
+            "- URLは不要。つけない\n"
+            "- ニュースの正確性は調べた結果に忠実にすること\n"
+        )
+
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=personality,
+                    tools=[{"google_search": {}}],
+                    temperature=0.8  # 雑談なので少しクリエイティブに
+                )
+            )
+            return response.text
+        except Exception as e:
+            print(f"Error calling Gemini API for random chat: {e}")
+            return None  # エラー時はNoneを返し、呼び出し元で処理
+
     async def generate_chat_response(self, personality: str, chat_history: list[dict], user_message: str) -> str:
         """
         スレッドやメンションでの会話用。

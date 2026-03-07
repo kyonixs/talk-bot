@@ -107,20 +107,15 @@ class NewsCog(commands.Cog):
             return
 
         try:
-            # 雑談用のプロンプト（自然な口調を誘導）
-            prompts = [
-                "「そういえばさ〜」みたいな感じで、最近気になったことや面白い話を友達にふと話しかけるように1〜2文（80文字以内）で書いて。ニュース紹介ではなく日常のひとこと。",
-                "「ちょっと聞いてよ〜」みたいなノリで、友達のグループチャットにふと思いついたことを投げかけるように1〜2文（80文字以内）で書いて。",
-                "「ねぇ知ってる？」みたいな感じで、最近知ったこととか気になってることを友達に軽く共有するように1〜2文（80文字以内）で書いて。",
-                "「あ〜暇だな〜」みたいなテンションで、友達にどうでもいい雑談を振るような1〜2文（80文字以内）を書いて。",
-            ]
-            prompt = random.choice(prompts)
-
-            response = await self.gemini.generate_chat_response(
+            # キャラの担当ジャンルで最新の話題を検索して雑談メッセージを生成
+            response = await self.gemini.generate_random_chat(
                 personality=char_data["personality"],
-                chat_history=[],
-                user_message=prompt
+                topics=char_data["description"]
             )
+
+            if not response:
+                print(f"[ランダム雑談] {char_data['name']} の雑談生成に失敗。スキップ。")
+                return
 
             await self._send_via_webhook(channel, char_data, response)
 
