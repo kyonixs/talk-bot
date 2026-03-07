@@ -10,6 +10,8 @@ from services.gemini_service import GeminiService
 
 
 class NewsCog(commands.Cog):
+    """ランダム雑談機能を担当するCog（定時配信は廃止済み）"""
+
     def __init__(self, bot):
         self.bot = bot
         self.gemini = GeminiService(bot.gemini_api_key)
@@ -24,12 +26,10 @@ class NewsCog(commands.Cog):
         self._today_chatted = set()  # キャラ名のセット
         self._today_date = None      # 日付追跡用
 
-        # 定時実行タスクの開始
-        self.scheduled_news.start()
+        # ランダム雑談タスクの開始
         self.random_chat.start()
 
     def cog_unload(self):
-        self.scheduled_news.cancel()
         self.random_chat.cancel()
 
     async def _get_or_create_webhook(self, channel):
@@ -54,37 +54,12 @@ class NewsCog(commands.Cog):
                     content=chunk,
                     username=character["name"],
                     avatar_url=icon_url,
-                    wait=True  # メッセージオブジェクトを返す（スレッド作成用）
+                    wait=True
                 )
             return sent_message
         except Exception as e:
             print(f"Webhook send error: {e}")
             return None
-
-    # --- 定時ニュース配信（毎日 8:00 / 18:00 JST） ---
-
-    @tasks.loop(time=[
-        datetime.time(hour=8, minute=0, tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
-    ])
-    async def scheduled_news(self):
-        """毎日朝8時に定時実行されるタスク"""
-        await self.bot.wait_until_ready()
-        print(f"[{datetime.datetime.now()}] 定時ニュース配信を開始します...")
-
-        if not self.channel_id:
-            print("CHANNEL_IDが設定されていません。")
-            return
-
-        channel = self.bot.get_channel(self.channel_id)
-        if not channel:
-            print(f"チャンネルID {self.channel_id} が見つかりませんでした。")
-            return
-
-        await self._send_all_characters_news(channel)
-
-    @scheduled_news.before_loop
-    async def before_scheduled_news(self):
-        await self.bot.wait_until_ready()
 
     # --- ランダム雑談（キャラクターが自発的に話しかける） ---
 
@@ -160,40 +135,6 @@ class NewsCog(commands.Cog):
         await self.bot.wait_until_ready()
         # 起動直後に発火しないよう、少し待つ
         await asyncio.sleep(300)  # 5分待機
-
-    # --- コマンド ---
-
-    @commands.command(name="news")
-    async def force_news(self, ctx):
-        """手動で全キャラのニュースを配信するコマンド (!news)"""
-        await ctx.send("📡 ニュースを取得してくるからちょっと待ってね！")
-        await self._send_all_characters_news(ctx.channel)
-
-    # --- 内部メソッド ---
-
-    async def _send_all_characters_news(self, channel):
-        """全キャラクター分のニュースを取得し、Webhook経由で投稿してスレッドを作成する"""
-        for char_key, char_data in CHARACTERS.items():
-            try:
-                print(f"[{char_data['name']}] 担当ジャンルのニュースを生成中...")
-                content = await self.gemini.generate_news(
-                    personality=char_data["personality"],
-                    topics=char_data["description"]
-                )
-
-                # Webhook経由でキャラクターとして送信
-                sent_message = await self._send_via_webhook(channel, char_data, content)
-
-                # スレッドの自動作成
-                if sent_message:
-                    thread_name = f"{char_data['name']}と話す💭"
-                    await sent_message.create_thread(
-                        name=thread_name,
-                        auto_archive_duration=1440  # 24時間
-                    )
-
-            except Exception as e:
-                print(f"[{char_key}] ニュース配信中にエラーが発生しました: {e}")
 
 
 async def setup(bot):

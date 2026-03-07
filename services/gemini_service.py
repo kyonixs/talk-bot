@@ -75,8 +75,14 @@ class GeminiService:
                 model=self.model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    system_instruction=personality,
-                    tools=[{"google_search": {}}], # 会話時も一応検索ツールを持たせておく
+                    system_instruction=(
+                        personality + "\n\n"
+                        "【重要なルール】\n"
+                        "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
+                        "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
+                        "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
+                    ),
+                    tools=[{"google_search": {}}],
                     temperature=0.7
                 )
             )
