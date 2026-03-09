@@ -20,10 +20,12 @@ class NewsBot(commands.Bot):
         # Secret ManagerからAPIキー類を取得
         print("Fetching secrets from GCP Secret Manager...")
         self.gemini_api_key = get_secret("GEMINI_API_KEY_SECRET")
+        self.gemini_api_key_stock = get_secret("GEMINI_API_KEY_STOCK")
+        self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_STOCK")
 
     async def setup_hook(self):
         # 起動時にCogを読み込む
-        cogs = ["cogs.news", "cogs.chat"]
+        cogs = ["cogs.news", "cogs.chat", "cogs.stock_report"]
         for cog in cogs:
             try:
                 await self.load_extension(cog)

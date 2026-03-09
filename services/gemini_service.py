@@ -12,6 +12,50 @@ class GeminiService:
         self.model_name = "gemini-2.5-flash"
         self.router_model_name = "gemini-2.0-flash-lite"  # Router用軽量モデル
 
+    async def generate_stock_report(self, prompt: str) -> dict:
+        """
+        株式レポート生成用。Google Search Grounding を使用し、
+        エラー時は最大3回までリトライする。長文出力用に上限を調整。
+        戻り値: {"text": str, "truncated": bool}
+        """
+        max_retries = 3
+        retry_delay = 5 # 初回リトライ待ち時間(秒)
+
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[{"google_search": {}}],
+                        temperature=0.3, # レポートなので事実ベースを強めるため低めに設定
+                        max_output_tokens=8192
+                    )
+                )
+
+                # finish_reasonがMAX_TOKENSで途切れたか判定
+                is_truncated = False
+                try:
+                    if response.candidates and response.candidates[0].finish_reason:
+                        # enum値か大文字文字列で返る場合がある
+                        reason = str(response.candidates[0].finish_reason).upper()
+                        if "MAX_TOKENS" in reason:
+                            is_truncated = True
+                except Exception:
+                    pass
+
+                return {"text": response.text, "truncated": is_truncated}
+
+            except Exception as e:
+                print(f"Gemini API Error (Attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    import asyncio
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2 # 指数バックオフ
+                else:
+                    print("Max retries reached. Reporting failure.")
+                    raise e
+
     async def generate_news(self, personality: str, topics: str) -> str:
         """
         指定されたキャラクターの性格(personality)とトピック(topics)に基づいて、

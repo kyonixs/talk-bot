@@ -1,0 +1,171 @@
+import aiohttp
+import asyncio
+from bs4 import BeautifulSoup
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+async def fetch_yahoo_chart(ticker: str) -> dict:
+    """Yahoo Finance API (v8) からチャートデータを取得する"""
+    hosts = [
+        "https://query1.finance.yahoo.com",
+        "https://query2.finance.yahoo.com"
+    ]
+    path = f"/v8/finance/chart/{ticker}?range=5d&interval=1d"
+    headers = {"User-Agent": USER_AGENT}
+
+    last_error = None
+    async with aiohttp.ClientSession() as session:
+        for host in hosts:
+            try:
+                async with session.get(host + path, headers=headers, timeout=10) as response:
+                    if response.status != 200:
+                        last_error = Exception(f"HTTP {response.status} from {host}")
+                        continue
+
+                    json_data = await response.json()
+                    result = json_data.get("chart", {}).get("result", [])
+                    if not result:
+                        last_error = Exception(f"No data from {host}")
+                        continue
+
+                    data = result[0]
+                    meta = data.get("meta", {})
+                    
+                    indicators = data.get("indicators", {})
+                    quote = indicators.get("quote", [{}])[0]
+                    closes = quote.get("close", [])
+                    
+                    # 不要な None などを除去
+                    valid_closes = [c for c in closes if c is not None]
+
+                    return {"meta": meta, "valid_closes": valid_closes}
+
+            except Exception as e:
+                last_error = e
+                print(f"Yahoo Finance Fallback: {host} -> {e}")
+
+    raise last_error or Exception(f"All hosts failed for: {ticker}")
+
+
+async def fetch_us_stock(ticker: str, cached_name: str = "") -> dict:
+    """米国株の価格情報を取得する"""
+    try:
+        chart_data = await fetch_yahoo_chart(ticker)
+        meta = chart_data["meta"]
+        valid_closes = chart_data["valid_closes"]
+
+        price = valid_closes[-1] if valid_closes else meta.get("regularMarketPrice")
+        previous_close = valid_closes[-2] if len(valid_closes) >= 2 else meta.get("previousClose")
+
+        change_pct_str = ""
+        if price and previous_close and previous_close != 0:
+            pct = ((price - previous_close) / previous_close) * 100
+            sign = "+" if pct >= 0 else ""
+            change_pct_str = f"{sign}{pct:.2f}%"
+
+        if price:
+            price = round(price, 2)
+
+        # 週間変動の計算
+        weekly_change_pct_str = ""
+        if len(valid_closes) >= 2:
+            week_start = valid_closes[0]
+            week_end = valid_closes[-1]
+            if week_start and week_end and week_start != 0:
+                pct_w = ((week_end - week_start) / week_start) * 100
+                sign_w = "+" if pct_w >= 0 else ""
+                weekly_change_pct_str = f"{sign_w}{pct_w:.2f}%"
+
+        name = cached_name or meta.get("shortName") or meta.get("longName") or ""
+
+        return {
+            "price": price or "",
+            "change": change_pct_str,
+            "weeklyChange": weekly_change_pct_str,
+            "name": name
+        }
+
+    except Exception as e:
+        print(f"Failed to fetch US stock {ticker}: {e}")
+        raise e
+
+
+async def fetch_jp_company_name(code: str) -> str:
+    """Yahoo Finance JP から日本株の企業名をスクレイピングする"""
+    try:
+        url = f"https://finance.yahoo.co.jp/quote/{code}.T"
+        headers = {"User-Agent": USER_AGENT}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status != 200:
+                    return ""
+                
+                html = await response.text()
+                soup = BeautifulSoup(html, "html.parser")
+                
+                title = soup.title.string if soup.title else ""
+                if not title:
+                    return ""
+
+                # "トヨタ自動車【7203】..." or "トヨタ自動車(7203)..." などのパース
+                idx = title.find("【")
+                if idx > 0: return title[:idx].strip()
+
+                idx = title.find("(")
+                if idx > 0: return title[:idx].strip()
+
+                idx = title.find(" - ")
+                if idx > 0: return title[:idx].strip()
+
+                return ""
+    except Exception as e:
+        print(f"Fetch JP Name Error ({code}): {e}")
+        return ""
+
+
+async def fetch_jp_stock(code: str, cached_name: str = "") -> dict:
+    """日本株の価格情報を取得する"""
+    try:
+        ticker = f"{code}.T"
+        chart_data = await fetch_yahoo_chart(ticker)
+        meta = chart_data["meta"]
+        valid_closes = chart_data["valid_closes"]
+
+        price = valid_closes[-1] if valid_closes else meta.get("regularMarketPrice")
+        previous_close = valid_closes[-2] if len(valid_closes) >= 2 else meta.get("previousClose")
+
+        change_pct_str = ""
+        if price and previous_close and previous_close != 0:
+            pct = ((price - previous_close) / previous_close) * 100
+            sign = "+" if pct >= 0 else ""
+            change_pct_str = f"{sign}{pct:.2f}%"
+
+        if price:
+            # 日本株は小数第1位まで
+            price = round(price, 1)
+
+        # 週間変動の計算
+        weekly_change_pct_str = ""
+        if len(valid_closes) >= 2:
+            week_start = valid_closes[0]
+            week_end = valid_closes[-1]
+            if week_start and week_end and week_start != 0:
+                pct_w = ((week_end - week_start) / week_start) * 100
+                sign_w = "+" if pct_w >= 0 else ""
+                weekly_change_pct_str = f"{sign_w}{pct_w:.2f}%"
+
+        name = cached_name
+        if not name:
+            name = await fetch_jp_company_name(code) or meta.get("shortName") or meta.get("longName") or ""
+
+        return {
+            "price": price or "",
+            "change": change_pct_str,
+            "weeklyChange": weekly_change_pct_str,
+            "name": name
+        }
+
+    except Exception as e:
+        print(f"Failed to fetch JP stock {code}: {e}")
+        raise e

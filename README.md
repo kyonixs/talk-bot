@@ -4,10 +4,14 @@
 GCP Compute Engine (e2-micro Always Free) 上でのDocker運用を想定して設計されています。
 
 ## ✨ 特徴
-- **定時配信:** 毎日 朝8:00 と 夕方18:00（JST）にニュースを配信
+- **定時雑談配信:** 毎日 朝8:00 と 夕方18:00（JST）にニュースを配信
+- **株式レポート配信（新機能）:** Google Sheetsの銘柄情報を元に、日米の株価とGeminiの分析を定期配信
+  - 米国株 日次: 平日 06:30 JST (夏時間05:30 JST)
+  - 日本株 日次: 平日 15:30 JST
+  - 米国株 週次: 土曜 15:00 JST / 日本株 週次: 土曜 14:00 JST
 - **スレッド会話:** ニュース配信スレッドに返信すると、担当キャラの口調で返事がきます
 - **メンション会話:** チャンネル内で `@Bot名 タケシ 最近のサッカーについて` と話しかけることも可能
-- **Gemini 2.5 Flash:** Google Search Groundingを利用し、最新ニュースをキャラブレなしで提供
+- **Gemini 2.5 Flash:** Google Search Groundingを利用し、最新ニュース・株価分析を提供
 
 ---
 
@@ -62,21 +66,25 @@ cd news-bot
 `.env` ファイルは使用しません。
 
 1. [GCPコンソール](https://console.cloud.google.com/) で「Secret Manager」を開き、APIを有効にします。
-2. 以下の2つのシークレットを作成し、値を設定してください。
+2. 以下の**4つ**のシークレットを作成し、値を設定してください。
    - `DISCORD_TOKEN_SECRET` （Discord Developer Portalで取得したBotのトークン）
-   - `GEMINI_API_KEY_SECRET` （Google AI Studio等で取得したGeminiのAPIキー）
+   - `GEMINI_API_KEY_SECRET` （雑談用：Google AI Studio等で取得したGeminiのAPIキー）
+   - `GEMINI_API_KEY_STOCK` （株式レポート用：用途分けのため別のキーを推奨）
+   - `DISCORD_WEBHOOK_STOCK` （株式レポート投稿先チャンネルのWebhook URL）
 3. Botを動かすVM（Compute Engine）のサービスアカウントに、**「Secret Manager のシークレット アクセサー」** 権限が付与されていることを確認してください。
 
 ### 3. 環境変数の設定 (docker-compose.yml)
-`docker-compose.yml` を開き、以下の `environment` セクションをご自身の環境に合わせて書き換えてください。
+`docker-compose.yml` を開き、以下の `environment` セクションをご自身の設定に合わせて書き換えてください。
 ```yaml
     environment:
-      - CHANNEL_ID=投稿したいチャンネルの数字ID
+      - CHANNEL_ID=雑談Botを投稿したいチャンネルの数字ID
       - TZ=Asia/Tokyo
       - GOOGLE_CLOUD_PROJECT=ご自身のGCPプロジェクトID
 ```
 
-> **注意:** Discord Developer Portal で Botの **`Message Content Intent`** を必ずONにしてください。
+> **注意:**
+> - Discord Developer Portal で Botの **`Message Content Intent`** を必ずONにしてください。
+> - 株式レポートは `DISCORD_WEBHOOK_STOCK` で指定したWebhook URLへ直接POSTされるため、環境変数でのチャンネルID指定は不要です。
 
 ---
 
