@@ -4,9 +4,9 @@ services:
     container_name: news-bot
     restart: always
     environment:
-      - CHANNEL_ID=123456789012345678
+      - CHANNEL_ID=${CHANNEL_ID}
       - TZ=Asia/Tokyo
-      - GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
     # e2-microの1GB RAMを考慮したメモリ制限
     mem_limit: 512m
     # swapを含めた最大メモリ使用量 (OS側でスワップが設定されている前提)
