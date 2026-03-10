@@ -72,12 +72,12 @@ cd news-bot
 
    | シークレット名 | 用途 |
    |---|---|
-   | `DISCORD_TOKEN_SECRET` | Discord Developer Portalで取得したBotのトークン |
-   | `GEMINI_API_KEY_SECRET` | 雑談用：Google AI Studio等で取得したGeminiのAPIキー |
+   | `DISCORD_BOT_TOKEN` | Discord Developer Portalで取得したBotのトークン |
+   | `GEMINI_API_KEY_CHAT` | 雑談用：Google AI Studio等で取得したGeminiのAPIキー |
    | `GEMINI_API_KEY_STOCK` | 株式レポート用：用途分けのため別のキーを推奨 |
-   | `DISCORD_WEBHOOK_STOCK` | 株式レポート投稿先チャンネルのWebhook URL |
-   | `CHANNEL_ID` | 雑談Botを投稿したいDiscordチャンネルの数字ID |
-   | `SPREADSHEET_ID` | Google Sheetsの銘柄管理スプレッドシートのID |
+   | `DISCORD_WEBHOOK_URL_STOCK` | 株式レポート投稿先チャンネルのWebhook URL |
+   | `DISCORD_CHANNEL_ID_CHAT` | 雑談Botを投稿したいDiscordチャンネルの数字ID |
+   | `GOOGLE_SPREADSHEET_ID_STOCK` | Google Sheetsの銘柄管理スプレッドシートのID |
 
 3. Botを動かすVM（Compute Engine）のサービスアカウントに、**「Secret Manager のシークレット アクセサー」** 権限が付与されていることを確認してください。
 
@@ -88,7 +88,7 @@ cd news-bot
 
 ### 3. 環境変数の設定 (docker-compose.yml)
 `docker-compose.yml` の `environment` セクションは基本的に `TZ=Asia/Tokyo` のみです。
-`CHANNEL_ID` や `SPREADSHEET_ID` は Secret Manager で管理されるため、環境変数への記載は不要です。
+`DISCORD_CHANNEL_ID_CHAT` や `GOOGLE_SPREADSHEET_ID_STOCK` は Secret Manager で管理されるため、環境変数への記載は不要です。
 
 ---
 

@@ -5,7 +5,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Tokyo
-      # CHANNEL_ID, SPREADSHEET_ID → Secret Manager で管理
+      # DISCORD_CHANNEL_ID_CHAT, GOOGLE_SPREADSHEET_ID_STOCK → Secret Manager で管理
       # GOOGLE_CLOUD_PROJECT → VM メタデータサーバーから自動取得
     # e2-microの1GB RAMを考慮したメモリ制限
     mem_limit: 512m

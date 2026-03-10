@@ -19,11 +19,11 @@ class NewsBot(commands.Bot):
         
         # Secret Managerからシークレット・設定値を取得
         print("Fetching secrets from GCP Secret Manager...")
-        self.gemini_api_key = get_secret("GEMINI_API_KEY_SECRET")
+        self.gemini_api_key = get_secret("GEMINI_API_KEY_CHAT")
         self.gemini_api_key_stock = get_secret("GEMINI_API_KEY_STOCK")
-        self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_STOCK")
-        self.channel_id = int(get_secret("CHANNEL_ID"))
-        self.spreadsheet_id = get_secret("SPREADSHEET_ID")
+        self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_URL_STOCK")
+        self.channel_id = int(get_secret("DISCORD_CHANNEL_ID_CHAT"))
+        self.spreadsheet_id = get_secret("GOOGLE_SPREADSHEET_ID_STOCK")
 
     async def setup_hook(self):
         # 起動時にCogを読み込む
@@ -44,7 +44,7 @@ class NewsBot(commands.Bot):
 if __name__ == "__main__":
     
     print("Initializing bot...")
-    discord_token = get_secret("DISCORD_TOKEN_SECRET")
+    discord_token = get_secret("DISCORD_BOT_TOKEN")
     
     bot = NewsBot()
     bot.run(discord_token)
