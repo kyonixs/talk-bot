@@ -58,6 +58,46 @@ async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) 
     raise last_error or Exception(f"All hosts failed for: {ticker}")
 
 
+async def fetch_market_indices(market: str, session: aiohttp.ClientSession = None) -> dict:
+    """主要指数データを取得する。market: 'US' or 'JP'"""
+    if market == "US":
+        tickers = {
+            "S&P 500": "^GSPC",
+            "NASDAQ": "^IXIC",
+            "USD/JPY": "JPY=X",
+        }
+    else:
+        tickers = {
+            "日経平均": "^N225",
+            "TOPIX": "^TOPX",
+            "USD/JPY": "JPY=X",
+        }
+
+    results = {}
+    for label, ticker in tickers.items():
+        try:
+            chart_data = await fetch_yahoo_chart(ticker, session=session)
+            closes = chart_data["valid_closes"]
+            if len(closes) >= 2:
+                current = closes[-1]
+                prev = closes[-2]
+                pct = ((current - prev) / prev) * 100 if prev else 0
+                sign = "+" if pct >= 0 else ""
+                results[label] = {
+                    "value": round(current, 2),
+                    "change": f"{sign}{pct:.2f}%",
+                }
+            elif closes:
+                results[label] = {"value": round(closes[-1], 2), "change": "-"}
+            else:
+                results[label] = {"value": "-", "change": "-"}
+        except Exception as e:
+            logger.warning(f"Failed to fetch index {label} ({ticker}): {e}")
+            results[label] = {"value": "-", "change": "-"}
+
+    return results
+
+
 async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.ClientSession = None) -> dict:
     """米国株の価格情報を取得する"""
     try:

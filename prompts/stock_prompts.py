@@ -24,6 +24,16 @@ TONE_INSTRUCTION = (
     "過度な装飾や天気予報風の演出は不要。事実→考察→アクションの流れを重視する。\n\n"
 )
 
+def format_indices_for_prompt(indices: dict) -> str:
+    """指数データをプロンプト用に文字列化する"""
+    if not indices:
+        return "（取得失敗）"
+    lines = []
+    for label, data in indices.items():
+        lines.append(f"- {label}: {data['value']}（前日比 {data['change']}）")
+    return "\n".join(lines)
+
+
 def format_stocks_for_prompt(stocks_map: dict, weekly: bool = False) -> str:
     """銘柄データをLLMプロンプト用に文字列化する"""
     entries = list(stocks_map.values())
@@ -55,9 +65,10 @@ def format_stocks_for_prompt(stocks_map: dict, weekly: bool = False) -> str:
 # US Prompts
 # ============================================================
 
-def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict) -> str:
+def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> str:
     holdings = format_stocks_for_prompt(holdings_map)
     watchlist = format_stocks_for_prompt(watchlist_map)
+    indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
 
     return (
         "# 指示\n\n"
@@ -75,13 +86,14 @@ def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict) -> str:
         "- 決算・ガイダンス変更・大型M&A・規制変更など投資テーゼに影響するニュースは ⚡ を付けて詳しく書く\n"
         "- 特段の材料がない銘柄は最後にまとめて1行で済ませる（個別コメント不要）\n"
         "- 推察には【推察】と付ける\n\n"
+        "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ\n" + holdings + "\n\n"
         "# 注目銘柄データ\n" + watchlist + "\n\n"
         + MD_FORMAT_RULES +
         "# レポート構成\n\n"
         "## 📌 今日の一言\n"
         "今日一番重要なことを1〜2文で。「読んだら何を意識すべきか」が伝わるように。\n"
-        "S&P500 / NASDAQ / 米10年債利回り / USD-JPY の前日比を含める。\n\n"
+        "上記の主要指数データの前日比をそのまま引用して含める。\n\n"
         "## ⚡ アラート（該当がある場合のみ）\n"
         "決算・ガイダンス変更・大きな値動きのある銘柄だけをピックアップ。\n"
         "各銘柄について: 何が起きた → なぜ → ポジションへの影響 → 推奨アクション（様子見/買い増し検討/要警戒など）\n\n"
@@ -91,9 +103,10 @@ def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict) -> str:
         "特段の個別材料がなかった銘柄を、名前と騰落率だけ一行ずつ列挙。コメントは不要。"
     )
 
-def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict) -> str:
+def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> str:
     holdings = format_stocks_for_prompt(holdings_map, weekly=True)
     watchlist = format_stocks_for_prompt(watchlist_map, weekly=True)
+    indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
 
     return (
         "# 指示\n\n"
@@ -109,6 +122,7 @@ def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict) -> str:
         "- 事実と推察を明確に区分する。推察には【推察】と付ける\n"
         "- 各銘柄の「買った理由（投資テーゼ）」に対して今週の情報がどう影響したかを評価する\n"
         "- 提供データにない数値には出典を付ける\n\n"
+        "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ（週間）\n" + holdings + "\n\n"
         "# 注目銘柄データ（週間）\n" + watchlist + "\n\n"
         + MD_FORMAT_RULES +
@@ -146,9 +160,10 @@ def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict) -> str:
 # JP Prompts
 # ============================================================
 
-def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict) -> str:
+def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> str:
     holdings = format_stocks_for_prompt(holdings_map)
     watchlist = format_stocks_for_prompt(watchlist_map)
+    indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
 
     return (
         "# 指示\n\n"
@@ -166,13 +181,14 @@ def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict) -> str:
         "- 決算・配当変更・優待変更・大型M&A・規制変更など投資テーゼに影響するニュースは ⚡ を付けて詳しく書く\n"
         "- 特段の材料がない銘柄は最後にまとめて1行で済ませる（個別コメント不要）\n"
         "- 推察には【推察】と付ける\n\n"
+        "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ\n" + holdings + "\n\n"
         "# 注目銘柄データ\n" + watchlist + "\n\n"
         + MD_FORMAT_RULES +
         "# レポート構成\n\n"
         "## 📌 今日の一言\n"
         "今日一番重要なことを1〜2文で。「読んだら何を意識すべきか」が伝わるように。\n"
-        "日経平均 / TOPIX / USD-JPY の前日比を含める。\n\n"
+        "上記の主要指数データの前日比をそのまま引用して含める。\n\n"
         "## ⚡ アラート（該当がある場合のみ）\n"
         "決算・配当変更・大きな値動きのある銘柄だけをピックアップ。\n"
         "各銘柄について: 何が起きた → なぜ → ポジションへの影響 → 推奨アクション（様子見/買い増し検討/要警戒など）\n\n"
@@ -182,9 +198,10 @@ def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict) -> str:
         "特段の個別材料がなかった銘柄を、名前と騰落率だけ一行ずつ列挙。コメントは不要。"
     )
 
-def build_jp_weekly_prompt(holdings_map: dict, watchlist_map: dict) -> str:
+def build_jp_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> str:
     holdings = format_stocks_for_prompt(holdings_map, weekly=True)
     watchlist = format_stocks_for_prompt(watchlist_map, weekly=True)
+    indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
 
     return (
         "# 指示\n\n"
@@ -200,6 +217,7 @@ def build_jp_weekly_prompt(holdings_map: dict, watchlist_map: dict) -> str:
         "- 事実と推察を明確に区分する。推察には【推察】と付ける\n"
         "- 各銘柄の「買った理由（投資テーゼ）」に対して今週の情報がどう影響したかを評価する\n"
         "- 提供データにない数値には出典を付ける\n\n"
+        "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ（週間）\n" + holdings + "\n\n"
         "# 注目銘柄データ（週間）\n" + watchlist + "\n\n"
         + MD_FORMAT_RULES +

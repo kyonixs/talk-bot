@@ -7,7 +7,7 @@ import aiohttp
 from datetime import datetime, timedelta
 from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, is_us_dst, TZ_JST
 from services.sheets_service import get_stocks_from_sheet
-from services.stock_service import fetch_us_stock, fetch_jp_stock
+from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices
 from services.gemini_service import GeminiService
 import prompts.stock_prompts as prompts
 
@@ -153,17 +153,21 @@ class StockReportCog(commands.Cog):
             holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
             watchlist_list = await get_stocks_from_sheet("監視銘柄", self.spreadsheet_id)
 
-            # 2. Yahoo Financeから株価・企業情報を取得
-            holdings_map = await self._fetch_all_stocks(holdings_list, market)
-            watchlist_map = await self._fetch_all_stocks(watchlist_list, market)
+            # 2. Yahoo Financeから株価・企業情報 + 主要指数を並列取得
+            async with aiohttp.ClientSession() as session:
+                holdings_map, watchlist_map, indices = await asyncio.gather(
+                    self._fetch_all_stocks(holdings_list, market),
+                    self._fetch_all_stocks(watchlist_list, market),
+                    fetch_market_indices(market, session=session),
+                )
 
-            # 3. プロンプト生成
+            # 3. プロンプト生成（指数データ付き）
             if market == "US":
-                prompt = prompts.build_us_weekly_prompt(holdings_map, watchlist_map) if weekly \
-                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map)
+                prompt = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
+                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices)
             else:
-                prompt = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map) if weekly \
-                    else prompts.build_jp_daily_prompt(holdings_map, watchlist_map)
+                prompt = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
+                    else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices)
 
             # 4. Gemini でレポート生成
             logger.info(f"Generating {report_name} using Gemini...")
@@ -172,9 +176,8 @@ class StockReportCog(commands.Cog):
             if ai_result.get("truncated"):
                 result_text += "\n\n*(※文字数制限により途切れています)*"
 
-            # 5. Discord Webhook へ送信
-            header = f"📊 **{report_name}レポート**"
-            await self.send_stock_report(result_text, header)
+            # 5. Discord Webhook へ送信（Embedヘッダー + 本文テキスト）
+            await self.send_stock_report(result_text, report_name, indices)
 
             logger.info(f"--- {report_name} workflow finished ---")
 
@@ -211,34 +214,131 @@ class StockReportCog(commands.Cog):
     # Discord Webhook Sender
     # =========================================================================
 
-    async def send_stock_report(self, text: str, header: str):
-        """Webhook URL を使用してDiscordに投稿する（1900文字分割）"""
+    def _build_header_embed(self, report_name: str, indices: dict) -> dict:
+        """Embedオブジェクト（JSON）を構築する"""
+        now = datetime.now(TZ_JST)
+        date_str = now.strftime("%Y/%m/%d (%a)")
+
+        # 指数サマリーをフィールドに変換
+        fields = []
+        for label, data in indices.items():
+            fields.append({
+                "name": label,
+                "value": f"{data['value']}（{data['change']}）",
+                "inline": True,
+            })
+
+        # 全体的に上昇か下落かで色を決定（USD/JPY以外の変化率で判定）
+        color = 0x808080  # グレー（デフォルト）
+        changes = []
+        for label, data in indices.items():
+            if label == "USD/JPY":
+                continue
+            try:
+                pct = float(data["change"].replace("+", "").replace("%", ""))
+                changes.append(pct)
+            except (ValueError, KeyError):
+                pass
+        if changes:
+            avg = sum(changes) / len(changes)
+            color = 0x2ECC71 if avg > 0 else 0xE74C3C if avg < 0 else 0x808080
+
+        return {
+            "title": f"📊 {report_name}レポート",
+            "description": date_str,
+            "color": color,
+            "fields": fields,
+            "footer": {"text": "AI株式アシスタント"},
+        }
+
+    async def send_stock_report(self, text: str, report_name: str, indices: dict):
+        """Embedヘッダーをチャンネルに投稿し、詳細本文はスレッド内に投稿する"""
         if not self.webhook_url:
             logger.error("Webhook URL is not set.")
             return
 
         logger.info(f"Sending message to Webhook... Length: {len(text)}")
-        chunks = self._chunk_message(text, 1900)
         session = await self._get_webhook_session()
+        webhook = discord.Webhook.from_url(self.webhook_url, session=session)
+        webhook_user = "AI株式アシスタント"
+        avatar_url = "https://img.icons8.com/color/96/bullish.png"
 
+        # 1. Embedヘッダーをチャンネルに送信（wait=True でメッセージを取得）
+        embed_dict = self._build_header_embed(report_name, indices)
+        embed_obj = discord.Embed.from_dict(embed_dict)
+        try:
+            header_msg = await webhook.send(
+                embed=embed_obj,
+                username=webhook_user,
+                avatar_url=avatar_url,
+                wait=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to post embed to webhook: {e}")
+            # Embed送信失敗時はスレッドなしでフォールバック
+            await self._send_chunks_flat(webhook, text, webhook_user, avatar_url)
+            return
+
+        # 2. Embedメッセージからスレッドを作成
+        now = datetime.now(TZ_JST)
+        thread_name = f"📊 {report_name} {now.strftime('%m/%d')}"
+        try:
+            channel = self.bot.get_channel(header_msg.channel.id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(header_msg.channel.id)
+            thread = await channel.create_thread(
+                name=thread_name,
+                message=header_msg,
+                auto_archive_duration=1440,  # 24時間で自動アーカイブ
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create thread, falling back to flat: {e}")
+            await self._send_chunks_flat(webhook, text, webhook_user, avatar_url)
+            return
+
+        # 3. 本文テキストをスレッド内にチャンク送信
+        await asyncio.sleep(1)
+        chunks = self._chunk_message(text, 1900)
         for i, chunk in enumerate(chunks):
-            if i == 0:
-                content = f"{header}\n\n{chunk}"
-            else:
-                content = f"(続き)\n{chunk}"
-
-            payload = {
-                "content": content,
-                "username": "AI株式アシスタント",
-                "avatar_url": "https://img.icons8.com/color/96/bullish.png"
-            }
-
+            content = f"(続き {i + 1})\n{chunk}" if i > 0 else chunk
             try:
-                async with session.post(self.webhook_url, json=payload) as resp:
-                    if resp.status not in (200, 204):
-                        logger.error(f"Webhook error: {resp.status} - {await resp.text()}")
+                await webhook.send(
+                    content=content,
+                    username=webhook_user,
+                    avatar_url=avatar_url,
+                    thread=thread,
+                    wait=True,
+                )
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    retry_after = getattr(e, "retry_after", 2)
+                    logger.warning(f"Rate limited. Waiting {retry_after}s...")
+                    await asyncio.sleep(retry_after)
+                else:
+                    logger.error(f"Webhook error in thread: {e}")
             except Exception as e:
-                logger.error(f"Failed to post to webhook: {e}")
+                logger.error(f"Failed to post to thread: {e}")
+
+            if i < len(chunks) - 1:
+                await asyncio.sleep(1)
+
+    async def _send_chunks_flat(self, webhook: discord.Webhook, text: str,
+                                username: str, avatar_url: str):
+        """スレッド作成失敗時のフォールバック: チャンネルに直接チャンク送信"""
+        chunks = self._chunk_message(text, 1900)
+        for i, chunk in enumerate(chunks):
+            content = f"(続き {i + 1})\n{chunk}" if i > 0 else chunk
+            try:
+                await webhook.send(
+                    content=content,
+                    username=username,
+                    avatar_url=avatar_url,
+                    wait=True,
+                )
+            except Exception as e:
+                logger.error(f"Flat send error: {e}")
+            if i < len(chunks) - 1:
+                await asyncio.sleep(1)
 
     def _chunk_message(self, text: str, max_length: int) -> list[str]:
         chunks = []

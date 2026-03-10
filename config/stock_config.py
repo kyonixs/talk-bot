@@ -66,16 +66,13 @@ def get_us_market_close_jst(dt: datetime = None) -> time:
     return close_dt_jst.time()
 
 def is_holiday(date_obj, market: str) -> bool:
-    """指定日付が指定市場（US/JP）の祝日かどうか判定する"""
+    """指定日付が指定市場（US/JP）の祝日（休場日）かどうか判定する"""
     year = date_obj.year
     if market == "US":
-        usa_holidays = holidays.US(years=year)
-        # 1行目は通常の祝日判定。株式市場特有の休場日（聖金曜日など）が必要なら
-        # holidays.financial_holidays.NYSE 等を使う方法もありますが、
-        # ここでは一般的な米国の祝日で判定します。
-        return date_obj in usa_holidays
+        nyse_holidays = holidays.financial_holidays.NYSE(years=year)
+        return date_obj in nyse_holidays
     elif market == "JP":
         jpn_holidays = holidays.JP(years=year)
         return date_obj in jpn_holidays
-        
+
     return False
