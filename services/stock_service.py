@@ -1,6 +1,9 @@
+import logging
 import aiohttp
 import asyncio
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -47,7 +50,7 @@ async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) 
 
             except Exception as e:
                 last_error = e
-                print(f"Yahoo Finance Fallback: {host} -> {e}")
+                logger.warning(f"Yahoo Finance Fallback: {host} -> {e}")
     finally:
         if owns_session:
             await session.close()
@@ -94,7 +97,7 @@ async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.Cl
         }
 
     except Exception as e:
-        print(f"Failed to fetch US stock {ticker}: {e}")
+        logger.warning(f"Failed to fetch US stock {ticker}: {e}")
         raise e
 
 
@@ -127,7 +130,7 @@ async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None
 
             return ""
     except Exception as e:
-        print(f"Fetch JP Name Error ({code}): {e}")
+        logger.warning(f"Fetch JP Name Error ({code}): {e}")
         return ""
     finally:
         if owns_session:
@@ -177,5 +180,5 @@ async def fetch_jp_stock(code: str, cached_name: str = "", session: aiohttp.Clie
         }
 
     except Exception as e:
-        print(f"Failed to fetch JP stock {code}: {e}")
+        logger.warning(f"Failed to fetch JP stock {code}: {e}")
         raise e

@@ -1,7 +1,15 @@
-import os
+import logging
 import discord
 from discord.ext import commands
 from services.secret_service import get_secret
+
+# ログ設定（全モジュール共通）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 # Intentsの設定（Message Contentが必須）
 intents = discord.Intents.default()
@@ -12,13 +20,13 @@ intents.guilds = True
 class NewsBot(commands.Bot):
     def __init__(self):
         super().__init__(
-            command_prefix="!", 
+            command_prefix="!",
             intents=intents,
             help_command=None
         )
-        
+
         # Secret Managerからシークレット・設定値を取得
-        print("Fetching secrets from GCP Secret Manager...")
+        logger.info("Fetching secrets from GCP Secret Manager...")
         self.gemini_api_key = get_secret("GEMINI_API_KEY_CHAT")
         self.gemini_api_key_stock = get_secret("GEMINI_API_KEY_STOCK")
         self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_URL_STOCK")
@@ -31,20 +39,18 @@ class NewsBot(commands.Bot):
         for cog in cogs:
             try:
                 await self.load_extension(cog)
-                print(f"Loaded extension: {cog}")
+                logger.info(f"Loaded extension: {cog}")
             except Exception as e:
-                print(f"Failed to load extension {cog}: {e}")
+                logger.error(f"Failed to load extension {cog}: {e}")
 
     async def on_ready(self):
-        print(f"Logged in as {self.user} (ID: {self.user.id})")
-        print("------")
+        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         # 起動ステータスの設定
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!help"))
 
 if __name__ == "__main__":
-    
-    print("Initializing bot...")
+    logger.info("Initializing bot...")
     discord_token = get_secret("DISCORD_BOT_TOKEN")
-    
+
     bot = NewsBot()
-    bot.run(discord_token)
+    bot.run(discord_token, log_handler=None)  # discord.pyの重複ログハンドラを無効化

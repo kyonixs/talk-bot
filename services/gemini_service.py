@@ -1,6 +1,9 @@
 import asyncio
+import logging
 from google import genai
 from google.genai import types
+
+logger = logging.getLogger(__name__)
 
 class GeminiService:
     def __init__(self, api_key: str):
@@ -47,12 +50,12 @@ class GeminiService:
                 return {"text": response.text, "truncated": is_truncated}
 
             except Exception as e:
-                print(f"Gemini API Error (Attempt {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"Gemini API Error (Attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2 # 指数バックオフ
                 else:
-                    print("Max retries reached. Reporting failure.")
+                    logger.error("Max retries reached. Reporting failure.")
                     raise e
 
     async def generate_random_chat(self, personality: str, topics: str) -> str | None:
@@ -86,7 +89,7 @@ class GeminiService:
             )
             return response.text
         except Exception as e:
-            print(f"Error calling Gemini API for random chat: {e}")
+            logger.error(f"Error calling Gemini API for random chat: {e}")
             return None  # エラー時はNoneを返し、呼び出し元で処理
 
     async def generate_chat_response(self, personality: str, chat_history: list[dict], user_message: str) -> str:
@@ -131,7 +134,7 @@ class GeminiService:
             )
             return response.text
         except Exception as e:
-            print(f"Error calling Gemini API for chat: {e}")
+            logger.error(f"Error calling Gemini API for chat: {e}")
             return "ごめんね、今ちょっと頭回ってないかも。もう一回言ってくれる？"
 
     async def determine_character(self, user_message: str) -> str:
@@ -166,5 +169,5 @@ class GeminiService:
                     return name
             return "タケシ" # デフォルト
         except Exception as e:
-            print(f"Router Error: {e}")
+            logger.error(f"Router Error: {e}")
             return "タケシ"

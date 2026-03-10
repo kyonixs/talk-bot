@@ -1,9 +1,17 @@
+import time
+import logging
 import discord
 from discord.ext import commands
 from collections import OrderedDict
 
 from config.characters import CHARACTERS, CHARACTER_ALIASES
 from services.gemini_service import GeminiService
+from services.webhook_service import send_as_character
+
+logger = logging.getLogger(__name__)
+
+# 同一ユーザーからの連続リクエストを抑制する間隔（秒）
+_COOLDOWN_SECONDS = 3
 
 
 class ChatCog(commands.Cog):
@@ -17,6 +25,9 @@ class ChatCog(commands.Cog):
         self.history = OrderedDict()
         self.MAX_HISTORY = 5
         self.MAX_CONTEXTS = 100  # 最大保持コンテキスト数
+
+        # クールダウン管理: {user_id: last_response_timestamp}
+        self._user_cooldowns: dict[int, float] = {}
 
     def _get_history(self, context_key: int) -> list:
         """会話履歴を取得（LRU方式で管理）"""
@@ -64,43 +75,6 @@ class ChatCog(commands.Cog):
         # フォールバック
         return CHARACTERS["タケシ"]
 
-    async def _send_via_webhook(self, channel, character: dict, content: str):
-        """Webhookを使用してキャラクターになりすましてメッセージを送信する"""
-        
-        target_channel = channel.parent if isinstance(channel, discord.Thread) else channel
-        thread = channel if isinstance(channel, discord.Thread) else discord.utils.MISSING
-        
-        try:
-            webhooks = await target_channel.webhooks()
-            webhook = discord.utils.get(webhooks, name="NewsBotWebhook")
-            if not webhook:
-                webhook = await target_channel.create_webhook(name="NewsBotWebhook")
-                
-            icon_url = character.get("icon_url", None)
-            
-            if len(content) <= 2000:
-                await webhook.send(
-                    content=content,
-                    username=character["name"],
-                    avatar_url=icon_url,
-                    thread=thread
-                )
-            else:
-                for i in range(0, len(content), 2000):
-                    await webhook.send(
-                        content=content[i:i + 2000],
-                        username=character["name"],
-                        avatar_url=icon_url,
-                        thread=thread
-                    )
-            return True
-        except discord.Forbidden:
-            print("Webhook creation forbidden. Falling back to normal reply.")
-            return False
-        except Exception as e:
-            print(f"Webhook send error: {e}")
-            return False
-
     @commands.Cog.listener()
     async def on_message(self, message):
         # Bot自身、またはWebhookからのメッセージは無視（無限ループ防止）
@@ -125,6 +99,13 @@ class ChatCog(commands.Cog):
 
         if not should_reply:
             return
+
+        # クールダウンチェック（同一ユーザーからの連続リクエストを抑制）
+        now = time.time()
+        last_time = self._user_cooldowns.get(message.author.id, 0)
+        if now - last_time < _COOLDOWN_SECONDS:
+            return
+        self._user_cooldowns[message.author.id] = now
 
         thread_name = message.channel.name if is_in_thread else ""
         content_clean = message.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
@@ -158,21 +139,14 @@ class ChatCog(commands.Cog):
                 if len(history) > self.MAX_HISTORY * 2:
                     del history[:len(history) - self.MAX_HISTORY * 2]
 
-                # Webhookでなりすまし送信
-                success = await self._send_via_webhook(message.channel, target_char, response_text)
-                
-                # Webhookが使えない場合は通常のreplyにフォールバック
-                if not success:
-                    if len(response_text) <= 2000:
-                        await message.reply(response_text)
-                    else:
-                        for i in range(0, len(response_text), 2000):
-                            chunk = response_text[i:i + 2000]
-                            await message.reply(chunk)
+                # Webhookでなりすまし送信（失敗時は通常replyにフォールバック）
+                result = await send_as_character(message.channel, target_char, response_text)
+                if result is None:
+                    await message.reply(response_text[:2000])
 
             except Exception as e:
-                print(f"Chat Cog Error: {e}")
-                await message.reply(f"ごめん、今ちょっと返事ができないみたい… (Error: {str(e)[:50]})")
+                logger.error(f"Chat Cog Error: {e}")
+                await message.reply("ごめん、今ちょっと返事ができないみたい…")
 
     @commands.command(name="ask")
     async def ask_command(self, ctx, char_name: str, *, question: str):
@@ -191,16 +165,12 @@ class ChatCog(commands.Cog):
                     chat_history=[],
                     user_message=question
                 )
-                # Webhookでなりすまし送信
-                success = await self._send_via_webhook(ctx.channel, target_char, response_text)
-                if not success:
-                    if len(response_text) <= 2000:
-                        await ctx.send(response_text)
-                    else:
-                        for i in range(0, len(response_text), 2000):
-                            await ctx.send(response_text[i:i + 2000])
+                # Webhookでなりすまし送信（失敗時は通常sendにフォールバック）
+                result = await send_as_character(ctx.channel, target_char, response_text)
+                if result is None:
+                    await ctx.send(response_text[:2000])
             except Exception as e:
-                print(f"Ask Command Error: {e}")
+                logger.error(f"Ask Command Error: {e}")
                 await ctx.send("ごめん、今システムエラーみたい。")
 
     @commands.command(name="help")

@@ -1,15 +1,19 @@
 import random
 import asyncio
+import logging
 import discord
 from discord.ext import commands, tasks
 import datetime
 
 from config.characters import CHARACTERS
 from services.gemini_service import GeminiService
+from services.webhook_service import send_as_character
+
+logger = logging.getLogger(__name__)
 
 
-class NewsCog(commands.Cog):
-    """ランダム雑談機能を担当するCog（定時配信は廃止済み）"""
+class RandomChatCog(commands.Cog):
+    """ランダム雑談機能を担当するCog"""
 
     def __init__(self, bot):
         self.bot = bot
@@ -31,35 +35,6 @@ class NewsCog(commands.Cog):
     def cog_unload(self):
         self.random_chat.cancel()
 
-    async def _get_or_create_webhook(self, channel):
-        """チャンネルに紐づくWebhookを取得（なければ作成）"""
-        webhooks = await channel.webhooks()
-        webhook = discord.utils.get(webhooks, name="NewsBotWebhook")
-        if not webhook:
-            webhook = await channel.create_webhook(name="NewsBotWebhook")
-        return webhook
-
-    async def _send_via_webhook(self, channel, character: dict, content: str):
-        """Webhookを使用してキャラクターになりすましてメッセージを送信する"""
-        try:
-            webhook = await self._get_or_create_webhook(channel)
-            icon_url = character.get("icon_url", None)
-
-            # 2000文字制限に対応
-            chunks = [content[i:i + 2000] for i in range(0, len(content), 2000)]
-            sent_message = None
-            for chunk in chunks:
-                sent_message = await webhook.send(
-                    content=chunk,
-                    username=character["name"],
-                    avatar_url=icon_url,
-                    wait=True
-                )
-            return sent_message
-        except Exception as e:
-            print(f"Webhook send error: {e}")
-            return None
-
     # --- ランダム雑談（キャラクターが自発的に話しかける） ---
 
     @tasks.loop(minutes=90)
@@ -75,7 +50,7 @@ class NewsCog(commands.Cog):
 
         # 8:00〜21:00 の範囲外なら何もしない
         if not (8 <= now_jst.hour < 21):
-            print(f"[ランダム雑談] 時間外のためスキップ ({now_jst.strftime('%H:%M')})")
+            logger.info(f"[ランダム雑談] 時間外のためスキップ ({now_jst.strftime('%H:%M')})")
             return
 
         # 日付が変わったら記録をリセット
@@ -94,12 +69,12 @@ class NewsCog(commands.Cog):
             if c["name"] not in self._today_chatted
         ]
         if not available_chars:
-            print("[ランダム雑談] 全キャラが今日すでに発言済み。スキップ。")
+            logger.info("[ランダム雑談] 全キャラが今日すでに発言済み。スキップ。")
             return
 
         # ランダムにキャラクターを1人選ぶ
         char_data = random.choice(available_chars)
-        print(f"[ランダム雑談] {char_data['name']} が話しかけます...")
+        logger.info(f"[ランダム雑談] {char_data['name']} が話しかけます...")
 
         channel = self.bot.get_channel(self.channel_id)
         if not channel:
@@ -113,16 +88,16 @@ class NewsCog(commands.Cog):
             )
 
             if not response:
-                print(f"[ランダム雑談] {char_data['name']} の雑談生成に失敗。スキップ。")
+                logger.info(f"[ランダム雑談] {char_data['name']} の雑談生成に失敗。スキップ。")
                 return
 
-            await self._send_via_webhook(channel, char_data, response)
+            await send_as_character(channel, char_data, response, wait=True)
 
             # 今日発言済みとして記録
             self._today_chatted.add(char_data["name"])
 
         except Exception as e:
-            print(f"[ランダム雑談] エラー: {e}")
+            logger.error(f"[ランダム雑談] エラー: {e}")
 
     @random_chat.before_loop
     async def before_random_chat(self):
@@ -132,4 +107,4 @@ class NewsCog(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(NewsCog(bot))
+    await bot.add_cog(RandomChatCog(bot))

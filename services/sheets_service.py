@@ -1,6 +1,23 @@
 import asyncio
+import logging
 import google.auth
 from googleapiclient.discovery import build
+
+logger = logging.getLogger(__name__)
+
+# モジュールレベルでキャッシュ（同一プロセス内で再利用）
+_cached_service = None
+
+
+def _get_sheets_service():
+    """Google Sheets APIサービスを取得（キャッシュ済みなら再利用）"""
+    global _cached_service
+    if _cached_service is None:
+        credentials, project = google.auth.default(
+            scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+        )
+        _cached_service = build('sheets', 'v4', credentials=credentials)
+    return _cached_service
 
 
 def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
@@ -8,10 +25,7 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
     Google Sheets API（同期）で銘柄情報を取得する。
     VM上のService Account (ADC) を使用して認証する。
     """
-    credentials, project = google.auth.default(
-        scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
-    )
-    service = build('sheets', 'v4', credentials=credentials)
+    service = _get_sheets_service()
 
     range_name = f"{sheet_name}!A:B"
     sheet = service.spreadsheets()
@@ -19,7 +33,7 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
 
     rows = result.get('values', [])
     if not rows or len(rows) <= 1:
-        print(f"No data found in sheet: {sheet_name}")
+        logger.warning(f"No data found in sheet: {sheet_name}")
         return []
 
     stocks = []
@@ -34,7 +48,7 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
             "category": category
         })
 
-    print(f"Loaded {len(stocks)} stocks from {sheet_name}")
+    logger.info(f"Loaded {len(stocks)} stocks from {sheet_name}")
     return stocks
 
 
@@ -45,5 +59,5 @@ async def get_stocks_from_sheet(sheet_name: str, spreadsheet_id: str) -> list[di
     try:
         return await asyncio.to_thread(_fetch_from_sheet_sync, sheet_name, spreadsheet_id)
     except Exception as e:
-        print(f"Error reading from sheet {sheet_name}: {e}")
+        logger.error(f"Error reading from sheet {sheet_name}: {e}")
         raise e

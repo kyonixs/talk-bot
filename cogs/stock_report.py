@@ -1,3 +1,4 @@
+import logging
 import discord
 from discord.ext import commands, tasks
 import asyncio
@@ -10,6 +11,9 @@ from services.stock_service import fetch_us_stock, fetch_jp_stock
 from services.gemini_service import GeminiService
 import prompts.stock_prompts as prompts
 
+logger = logging.getLogger(__name__)
+
+
 class StockReportCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -21,25 +25,51 @@ class StockReportCog(commands.Cog):
         # 同時実行を防ぐロック
         self._report_lock = asyncio.Lock()
 
+        # Webhook送信用の共有セッション（cog_unloadで閉じる）
+        self._webhook_session: aiohttp.ClientSession | None = None
+
         # 毎分チェックのループタスクを開始
         self.check_and_run_reports.start()
-        print("StockReportCog loaded and scheduler started.")
+        logger.info("StockReportCog loaded and scheduler started.")
 
     def cog_unload(self):
         self.check_and_run_reports.cancel()
-        print("StockReportCog unloaded and scheduler stopped.")
+        if self._webhook_session and not self._webhook_session.closed:
+            asyncio.create_task(self._webhook_session.close())
+        logger.info("StockReportCog unloaded and scheduler stopped.")
+
+    async def _get_webhook_session(self) -> aiohttp.ClientSession:
+        """Webhook送信用セッションを取得（遅延初期化・再利用）"""
+        if self._webhook_session is None or self._webhook_session.closed:
+            self._webhook_session = aiohttp.ClientSession()
+        return self._webhook_session
+
+    def _create_report_task(self, coro, name: str):
+        """レポートタスクを作成し、例外をロギングするコールバックを付与する"""
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._handle_task_exception)
+        return task
+
+    @staticmethod
+    def _handle_task_exception(task: asyncio.Task):
+        """タスク完了時に例外があればログに記録する"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"Report task '{task.get_name()}' failed: {exc}", exc_info=exc)
 
     # =========================================================================
     # Scheduler
     # =========================================================================
-    
+
     @tasks.loop(minutes=1)
     async def check_and_run_reports(self):
         """毎分実行され、設定されたスケジュール時刻と一致した場合にレポート処理を起動する"""
         now = datetime.now(TZ_JST)
         is_weekday = now.weekday() < 5  # 0-4 (Mon-Fri)
         is_saturday = now.weekday() == 5 # 5 (Sat)
-        
+
         # 1. 米国株 日次 (平日, 祝日除外, サマータイム対応)
         schedules = STOCK_CONFIG["schedules"]
         us_daily = schedules["us_daily"]
@@ -53,10 +83,10 @@ class StockReportCog(commands.Cog):
                 # target_timeにoffset(分)を足す
                 target_dt = datetime.combine(now.date(), target_time, tzinfo=TZ_JST)
                 target_dt += timedelta(minutes=offset)
-                
+
                 if now.hour == target_dt.hour and now.minute == target_dt.minute:
-                    print("Triggering US Daily Report...")
-                    asyncio.create_task(self.run_us_daily_report())
+                    logger.info("Triggering US Daily Report...")
+                    self._create_report_task(self.run_us_daily_report(), "us_daily_report")
 
         # 2. 日本株 日次 (平日, 祝日除外)
         jp_daily = schedules["jp_daily"]
@@ -68,24 +98,24 @@ class StockReportCog(commands.Cog):
                 offset = STOCK_CONFIG.get("market_close_offset_minutes", 30)
                 target_dt = datetime.combine(now.date(), target_time, tzinfo=TZ_JST)
                 target_dt += timedelta(minutes=offset)
-                
+
                 if now.hour == target_dt.hour and now.minute == target_dt.minute:
-                    print("Triggering JP Daily Report...")
-                    asyncio.create_task(self.run_jp_daily_report())
+                    logger.info("Triggering JP Daily Report...")
+                    self._create_report_task(self.run_jp_daily_report(), "jp_daily_report")
 
         # 3. 日本株 週次 (土曜固定)
         jp_weekly = schedules["jp_weekly"]
         if is_saturday and jp_weekly.get("saturday_only"):
             if now.hour == jp_weekly["hour"] and now.minute == jp_weekly["minute"]:
-                print("Triggering JP Weekly Report...")
-                asyncio.create_task(self.run_jp_weekly_report())
+                logger.info("Triggering JP Weekly Report...")
+                self._create_report_task(self.run_jp_weekly_report(), "jp_weekly_report")
 
         # 4. 米国株 週次 (土曜固定)
         us_weekly = schedules["us_weekly"]
         if is_saturday and us_weekly.get("saturday_only"):
             if now.hour == us_weekly["hour"] and now.minute == us_weekly["minute"]:
-                print("Triggering US Weekly Report...")
-                asyncio.create_task(self.run_us_weekly_report())
+                logger.info("Triggering US Weekly Report...")
+                self._create_report_task(self.run_us_weekly_report(), "us_weekly_report")
 
     @check_and_run_reports.before_loop
     async def before_check(self):
@@ -110,14 +140,14 @@ class StockReportCog(commands.Cog):
     async def _run_report_workflow(self, report_name: str, market: str, weekly: bool):
         """全体のワークフロー: データ取得 -> レポート生成 -> Discord送信"""
         if self._report_lock.locked():
-            print(f"[{report_name}] 別のレポートが実行中のためスキップ")
+            logger.warning(f"[{report_name}] 別のレポートが実行中のためスキップ")
             return
 
         async with self._report_lock:
             await self._run_report_workflow_inner(report_name, market, weekly)
 
     async def _run_report_workflow_inner(self, report_name: str, market: str, weekly: bool):
-        print(f"--- 🚀 Starting {report_name} workflow ---")
+        logger.info(f"--- Starting {report_name} workflow ---")
         try:
             # 1. Sheetsから銘柄リスト取得
             holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
@@ -136,7 +166,7 @@ class StockReportCog(commands.Cog):
                     else prompts.build_jp_daily_prompt(holdings_map, watchlist_map)
 
             # 4. Gemini でレポート生成
-            print(f"Generating {report_name} using Gemini...")
+            logger.info(f"Generating {report_name} using Gemini...")
             ai_result = await self.gemini_service.generate_stock_report(prompt)
             result_text = ai_result.get("text", "")
             if ai_result.get("truncated"):
@@ -145,8 +175,8 @@ class StockReportCog(commands.Cog):
             # 5. Discord Webhook へ送信
             header = f"📊 **{report_name}レポート**"
             await self.send_stock_report(result_text, header)
-            
-            print(f"--- ✅ {report_name} workflow finished ---")
+
+            logger.info(f"--- {report_name} workflow finished ---")
 
         except Exception as e:
             await self.notify_error(f"{report_name} Workflow", e)
@@ -168,7 +198,7 @@ class StockReportCog(commands.Cog):
                     # dictにマージして保存
                     stock_map[ticker] = {**stock, **data}
                 except Exception as e:
-                    print(f"Error fetching {ticker}: {e}")
+                    logger.warning(f"Error fetching {ticker}: {e}")
                     stock_map[ticker] = {**stock, "price": "Error", "change": "-", "weeklyChange": "-", "name": ticker}
 
             for stock in stock_list:
@@ -184,32 +214,31 @@ class StockReportCog(commands.Cog):
     async def send_stock_report(self, text: str, header: str):
         """Webhook URL を使用してDiscordに投稿する（1900文字分割）"""
         if not self.webhook_url:
-            print("Error: Webhook URL is not set.")
+            logger.error("Webhook URL is not set.")
             return
 
-        print(f"Sending message to Webhook... Length: {len(text)}")
+        logger.info(f"Sending message to Webhook... Length: {len(text)}")
         chunks = self._chunk_message(text, 1900)
-        
-        async with aiohttp.ClientSession() as session:
-            for i, chunk in enumerate(chunks):
-                if i == 0:
-                    content = f"{header}\n\n{chunk}"
-                else:
-                    content = f"(続き)\n{chunk}"
+        session = await self._get_webhook_session()
 
-                payload = {
-                    "content": content,
-                    # Webhookの名前やアイコンをここで上書き可能（要件次第）
-                    "username": "AI株式アシスタント",
-                    "avatar_url": "https://img.icons8.com/color/96/bullish.png"
-                }
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                content = f"{header}\n\n{chunk}"
+            else:
+                content = f"(続き)\n{chunk}"
 
-                try:
-                    async with session.post(self.webhook_url, json=payload) as resp:
-                        if resp.status not in (200, 204):
-                            print(f"Webhook error: {resp.status} - {await resp.text()}")
-                except Exception as e:
-                    print(f"Failed to post to webhook: {e}")
+            payload = {
+                "content": content,
+                "username": "AI株式アシスタント",
+                "avatar_url": "https://img.icons8.com/color/96/bullish.png"
+            }
+
+            try:
+                async with session.post(self.webhook_url, json=payload) as resp:
+                    if resp.status not in (200, 204):
+                        logger.error(f"Webhook error: {resp.status} - {await resp.text()}")
+            except Exception as e:
+                logger.error(f"Failed to post to webhook: {e}")
 
     def _chunk_message(self, text: str, max_length: int) -> list[str]:
         chunks = []
@@ -217,6 +246,15 @@ class StockReportCog(commands.Cog):
         current_chunk = ""
 
         for line in lines:
+            # 単一行がmax_lengthを超える場合は文字数で強制分割
+            if len(line) > max_length:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+                for j in range(0, len(line), max_length):
+                    chunks.append(line[j:j + max_length])
+                continue
+
             if len(current_chunk) + len(line) + 1 > max_length:
                 if current_chunk:
                     chunks.append(current_chunk)
@@ -235,19 +273,19 @@ class StockReportCog(commands.Cog):
     async def notify_error(self, func_name: str, error: Exception):
         """エラー発生時にWebhookに通知する（内部情報はログのみ）"""
         # スタックトレースはサーバーログにのみ出力
-        print(f"[ERROR] {func_name}: {traceback.format_exc()}")
+        logger.error(f"{func_name}: {traceback.format_exc()}")
 
         # Discordにはエラー種別と概要のみ送信（パスやモジュール名を露出しない）
         error_type = type(error).__name__
         text = f"🚨 **Stock Report Error** 🚨\n**処理:** {func_name}\n**種別:** {error_type}\n詳細はサーバーログを確認してください。"
-            
+
         if self.webhook_url:
-            async with aiohttp.ClientSession() as session:
-                payload = {"content": text, "username": "エラー監視"}
-                try:
-                    await session.post(self.webhook_url, json=payload)
-                except Exception as push_err:
-                    print(f"Failed to push error log to webhook: {push_err}")
+            session = await self._get_webhook_session()
+            payload = {"content": text, "username": "エラー監視"}
+            try:
+                await session.post(self.webhook_url, json=payload)
+            except Exception as push_err:
+                logger.error(f"Failed to push error log to webhook: {push_err}")
 
 async def setup(bot):
     await bot.add_cog(StockReportCog(bot))
