@@ -1,28 +1,9 @@
-import os
 import discord
 from discord.ext import commands
 from collections import OrderedDict
 
-from config.characters import CHARACTERS
+from config.characters import CHARACTERS, CHARACTER_ALIASES
 from services.gemini_service import GeminiService
-
-# キャラクター名の別名マッピング（柔軟なマッチング用）
-CHARACTER_ALIASES = {}
-for _key, _data in CHARACTERS.items():
-    name = _data["name"]
-    # 正式名をそのまま登録
-    CHARACTER_ALIASES[name] = _data
-    # 辞書キーも登録（キーと name が異なる場合に備える）
-    CHARACTER_ALIASES[_key] = _data
-    # ひらがな版を登録
-    _hiragana_map = {
-        "タケシ": "たけし",
-        "アカリ先輩": "あかり先輩",
-        "ゆうた": "ゆうた",
-        "れな": "れな",
-    }
-    if name in _hiragana_map:
-        CHARACTER_ALIASES[_hiragana_map[name]] = _data
 
 
 class ChatCog(commands.Cog):
@@ -133,7 +114,7 @@ class ChatCog(commands.Cog):
         is_in_thread = isinstance(message.channel, discord.Thread)
         is_mentioned = self.bot.user in message.mentions
         
-        target_channel_id = int(os.getenv("CHANNEL_ID", 0))
+        target_channel_id = self.bot.channel_id
         is_in_target_channel = message.channel.id == target_channel_id if not is_in_thread else message.channel.parent_id == target_channel_id
 
         # 当該チャンネルか、Bot作成スレッド内、またはメンションされたら反応
@@ -243,7 +224,6 @@ class ChatCog(commands.Cog):
         embed.add_field(
             name="コマンド一覧",
             value=(
-                "`!news` — 今すぐ全キャラのニュースを配信\n"
                 "`!ask {キャラ名} {質問}` — 特定のキャラに質問\n"
                 "`!help` — このヘルプを表示"
             ),

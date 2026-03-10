@@ -1,4 +1,4 @@
-import os
+import asyncio
 from google import genai
 from google.genai import types
 
@@ -49,46 +49,11 @@ class GeminiService:
             except Exception as e:
                 print(f"Gemini API Error (Attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
-                    import asyncio
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2 # 指数バックオフ
                 else:
                     print("Max retries reached. Reporting failure.")
                     raise e
-
-    async def generate_news(self, personality: str, topics: str) -> str:
-        """
-        指定されたキャラクターの性格(personality)とトピック(topics)に基づいて、
-        Google Search Groundingを利用してニュース紹介文を生成する
-        """
-        prompt = (
-            f"今日は日本の現在の日付です。Google検索を使って、以下のトピックの最新ニュースを調べてください:\n"
-            f"{topics}\n\n"
-            "調べた結果をもとに、友達のグループチャットに投げかけるような自然な雑談メッセージを書いてください。\n"
-            "ルール:\n"
-            "- 2〜3本のネタをピックアップ\n"
-            "- 「こんなのあるらしいよ」「ちょっと聞いた話なんだけど」「そういえば」みたいな自然な切り出し方をする\n"
-            "- 「今日のニュースは」「本日のトピックは」のようなアナウンサー的・ニュースキャスター的な言い回しは絶対に使わない\n"
-            "- 各ネタは1〜2文で簡潔に。ダラダラ説明しない\n"
-            "- URLは不要。つけない\n"
-            "- **全体で150〜250文字に収めること（厳守）**\n"
-            "- ニュースの正確性は調べた結果に忠実にすること\n"
-        )
-
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=personality,
-                    tools=[{"google_search": {}}],
-                    temperature=0.7 # 少しクリエイティビティを持たせる
-                )
-            )
-            return response.text
-        except Exception as e:
-            print(f"Error calling Gemini API for news: {e}")
-            return "ごめん！ニュース調べるの失敗しちゃったみたい。後でもう一回聞いて！"
 
     async def generate_random_chat(self, personality: str, topics: str) -> str | None:
         """

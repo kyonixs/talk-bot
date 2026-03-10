@@ -1,16 +1,18 @@
 # 🗞️ 雑談ニュースBot (News Bot)
 
-個性豊かな4人のキャラクターが、Discordで毎日ニュースを配信し、雑談にも応じてくれるBotです。
+個性豊かな4人のキャラクターが、Discordで雑談や株式レポートを届けてくれるBotです。
 GCP Compute Engine (e2-micro Always Free) 上でのDocker運用を想定して設計されています。
 
 ## ✨ 特徴
-- **定時雑談配信:** 毎日 朝8:00 と 夕方18:00（JST）にニュースを配信
-- **株式レポート配信（新機能）:** Google Sheetsの銘柄情報を元に、日米の株価とGeminiの分析を定期配信
+- **ランダム雑談:** 90分ごとに30%の確率でキャラクターが自発的に話しかける（8〜21時JST、同日重複なし）
+- **AI Router:** Gemini 2.0 Flash Lite がユーザーの発言内容から最適なキャラクターを自動選択
+- **Webhook なりすまし:** キャラクターの名前・アイコンで送信し、リアルな友達グループ感を演出
+- **株式レポート配信:** Google Sheetsの銘柄情報を元に、日米の株価とGeminiの分析を定期配信
   - 米国株 日次: 平日 06:30 JST (夏時間05:30 JST)
   - 日本株 日次: 平日 15:30 JST
   - 米国株 週次: 土曜 15:00 JST / 日本株 週次: 土曜 14:00 JST
-- **スレッド会話:** ニュース配信スレッドに返信すると、担当キャラの口調で返事がきます
-- **メンション会話:** チャンネル内で `@Bot名 タケシ 最近のサッカーについて` と話しかけることも可能
+- **スレッド会話:** Bot作成スレッドに返信すると、担当キャラの口調で返事がきます
+- **メンション会話:** チャンネル内で `@Bot名` と話しかけることも可能
 - **Gemini 2.5 Flash:** Google Search Groundingを利用し、最新ニュース・株価分析を提供
 
 ---
@@ -66,25 +68,27 @@ cd news-bot
 `.env` ファイルは使用しません。
 
 1. [GCPコンソール](https://console.cloud.google.com/) で「Secret Manager」を開き、APIを有効にします。
-2. 以下の**4つ**のシークレットを作成し、値を設定してください。
-   - `DISCORD_TOKEN_SECRET` （Discord Developer Portalで取得したBotのトークン）
-   - `GEMINI_API_KEY_SECRET` （雑談用：Google AI Studio等で取得したGeminiのAPIキー）
-   - `GEMINI_API_KEY_STOCK` （株式レポート用：用途分けのため別のキーを推奨）
-   - `DISCORD_WEBHOOK_STOCK` （株式レポート投稿先チャンネルのWebhook URL）
+2. 以下の**6つ**のシークレットを作成し、値を設定してください。
+
+   | シークレット名 | 用途 |
+   |---|---|
+   | `DISCORD_TOKEN_SECRET` | Discord Developer Portalで取得したBotのトークン |
+   | `GEMINI_API_KEY_SECRET` | 雑談用：Google AI Studio等で取得したGeminiのAPIキー |
+   | `GEMINI_API_KEY_STOCK` | 株式レポート用：用途分けのため別のキーを推奨 |
+   | `DISCORD_WEBHOOK_STOCK` | 株式レポート投稿先チャンネルのWebhook URL |
+   | `CHANNEL_ID` | 雑談Botを投稿したいDiscordチャンネルの数字ID |
+   | `SPREADSHEET_ID` | Google Sheetsの銘柄管理スプレッドシートのID |
+
 3. Botを動かすVM（Compute Engine）のサービスアカウントに、**「Secret Manager のシークレット アクセサー」** 権限が付与されていることを確認してください。
 
-### 3. 環境変数の設定 (docker-compose.yml)
-`docker-compose.yml` を開き、以下の `environment` セクションをご自身の設定に合わせて書き換えてください。
-```yaml
-    environment:
-      - CHANNEL_ID=雑談Botを投稿したいチャンネルの数字ID
-      - TZ=Asia/Tokyo
-      - GOOGLE_CLOUD_PROJECT=ご自身のGCPプロジェクトID
-```
-
 > **注意:**
+> - `GOOGLE_CLOUD_PROJECT` は環境変数で設定するか、GCP VM上では**メタデータサーバーから自動検出**されます。
 > - Discord Developer Portal で Botの **`Message Content Intent`** を必ずONにしてください。
-> - 株式レポートは `DISCORD_WEBHOOK_STOCK` で指定したWebhook URLへ直接POSTされるため、環境変数でのチャンネルID指定は不要です。
+> - 株式レポートは `DISCORD_WEBHOOK_STOCK` で指定したWebhook URLへ直接POSTされます。
+
+### 3. 環境変数の設定 (docker-compose.yml)
+`docker-compose.yml` の `environment` セクションは基本的に `TZ=Asia/Tokyo` のみです。
+`CHANNEL_ID` や `SPREADSHEET_ID` は Secret Manager で管理されるため、環境変数への記載は不要です。
 
 ---
 
@@ -118,8 +122,8 @@ docker compose up -d --build
 
 | コマンド/操作 | 説明 |
 |---|---|
-| `!news` | 定時配信を待たずに、今すぐ全キャラのニュースを手動配信します。 |
 | `!ask キャラ名 質問の内容` | 特定のキャラクターを指名して単発の質問ができます。（例: `!ask アカリ先輩 今日の天気は？`） |
-| `!help` | Botのデフォルトヘルプを表示します。 |
-| **スレッド返信** | 定時ニュースのスレッドにそのまま書き込むと、そのニュースの担当キャラが答えます。 |
-| **メンション** | `@Botキャラ名 これについて教えて` のように話しかけると一番近いキャラが答えます。 |
+| `!help` | キャラ紹介とコマンド一覧を表示します。 |
+| **チャンネル内発言** | 雑談チャンネル内で自由に発言 → AIが最適なキャラを自動選択して応答 |
+| **スレッド返信** | Bot作成スレッドにそのまま書き込むと、そのスレッドのキャラが答えます。 |
+| **メンション** | `@Bot名 これについて教えて` のように話しかけると最適なキャラが答えます。 |

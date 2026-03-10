@@ -17,11 +17,13 @@ class NewsBot(commands.Bot):
             help_command=None
         )
         
-        # Secret ManagerからAPIキー類を取得
+        # Secret Managerからシークレット・設定値を取得
         print("Fetching secrets from GCP Secret Manager...")
         self.gemini_api_key = get_secret("GEMINI_API_KEY_SECRET")
         self.gemini_api_key_stock = get_secret("GEMINI_API_KEY_STOCK")
         self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_STOCK")
+        self.channel_id = int(get_secret("CHANNEL_ID"))
+        self.spreadsheet_id = get_secret("SPREADSHEET_ID")
 
     async def setup_hook(self):
         # 起動時にCogを読み込む

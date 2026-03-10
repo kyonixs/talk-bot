@@ -7,12 +7,11 @@ TZ_JST = ZoneInfo("Asia/Tokyo")
 TZ_NY = ZoneInfo("America/New_York")
 
 STOCK_CONFIG = {
-    # 銘柄マスタとして使用するGoogle SpreadsheetのID
-    "spreadsheet_id": "1v_FHDdfMwEVFg3fc7FZIMBPA6r9HaFFMHRGDZsVQQdQ",
-    
+    # spreadsheet_id は Secret Manager で管理（bot.spreadsheet_id 経由）
+
     # 株式レポート用モデル（Flash 2.5推移）
     "gemini_model": "gemini-2.5-flash",
-    
+
     # 閉場後何分で実行するか
     "market_close_offset_minutes": 30,
 

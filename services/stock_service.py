@@ -3,8 +3,9 @@ import asyncio
 from bs4 import BeautifulSoup
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
-async def fetch_yahoo_chart(ticker: str) -> dict:
+async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) -> dict:
     """Yahoo Finance API (v8) からチャートデータを取得する"""
     hosts = [
         "https://query1.finance.yahoo.com",
@@ -13,11 +14,15 @@ async def fetch_yahoo_chart(ticker: str) -> dict:
     path = f"/v8/finance/chart/{ticker}?range=5d&interval=1d"
     headers = {"User-Agent": USER_AGENT}
 
+    owns_session = session is None
+    if owns_session:
+        session = aiohttp.ClientSession()
+
     last_error = None
-    async with aiohttp.ClientSession() as session:
+    try:
         for host in hosts:
             try:
-                async with session.get(host + path, headers=headers, timeout=10) as response:
+                async with session.get(host + path, headers=headers, timeout=_REQUEST_TIMEOUT) as response:
                     if response.status != 200:
                         last_error = Exception(f"HTTP {response.status} from {host}")
                         continue
@@ -30,11 +35,11 @@ async def fetch_yahoo_chart(ticker: str) -> dict:
 
                     data = result[0]
                     meta = data.get("meta", {})
-                    
+
                     indicators = data.get("indicators", {})
                     quote = indicators.get("quote", [{}])[0]
                     closes = quote.get("close", [])
-                    
+
                     # 不要な None などを除去
                     valid_closes = [c for c in closes if c is not None]
 
@@ -43,14 +48,17 @@ async def fetch_yahoo_chart(ticker: str) -> dict:
             except Exception as e:
                 last_error = e
                 print(f"Yahoo Finance Fallback: {host} -> {e}")
+    finally:
+        if owns_session:
+            await session.close()
 
     raise last_error or Exception(f"All hosts failed for: {ticker}")
 
 
-async def fetch_us_stock(ticker: str, cached_name: str = "") -> dict:
+async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.ClientSession = None) -> dict:
     """米国株の価格情報を取得する"""
     try:
-        chart_data = await fetch_yahoo_chart(ticker)
+        chart_data = await fetch_yahoo_chart(ticker, session=session)
         meta = chart_data["meta"]
         valid_closes = chart_data["valid_closes"]
 
@@ -90,45 +98,47 @@ async def fetch_us_stock(ticker: str, cached_name: str = "") -> dict:
         raise e
 
 
-async def fetch_jp_company_name(code: str) -> str:
+async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None) -> str:
     """Yahoo Finance JP から日本株の企業名をスクレイピングする"""
+    owns_session = session is None
+    if owns_session:
+        session = aiohttp.ClientSession()
+
     try:
         url = f"https://finance.yahoo.co.jp/quote/{code}.T"
         headers = {"User-Agent": USER_AGENT}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as response:
-                if response.status != 200:
-                    return ""
-                
-                html = await response.text()
-                soup = BeautifulSoup(html, "html.parser")
-                
-                title = soup.title.string if soup.title else ""
-                if not title:
-                    return ""
 
-                # "トヨタ自動車【7203】..." or "トヨタ自動車(7203)..." などのパース
-                idx = title.find("【")
-                if idx > 0: return title[:idx].strip()
-
-                idx = title.find("(")
-                if idx > 0: return title[:idx].strip()
-
-                idx = title.find(" - ")
-                if idx > 0: return title[:idx].strip()
-
+        async with session.get(url, headers=headers, timeout=_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
                 return ""
+
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
+
+            title = soup.title.string if soup.title else ""
+            if not title:
+                return ""
+
+            # "トヨタ自動車【7203】..." or "トヨタ自動車(7203)..." などのパース
+            for sep in ["【", "(", " - "]:
+                idx = title.find(sep)
+                if idx > 0:
+                    return title[:idx].strip()
+
+            return ""
     except Exception as e:
         print(f"Fetch JP Name Error ({code}): {e}")
         return ""
+    finally:
+        if owns_session:
+            await session.close()
 
 
-async def fetch_jp_stock(code: str, cached_name: str = "") -> dict:
+async def fetch_jp_stock(code: str, cached_name: str = "", session: aiohttp.ClientSession = None) -> dict:
     """日本株の価格情報を取得する"""
     try:
         ticker = f"{code}.T"
-        chart_data = await fetch_yahoo_chart(ticker)
+        chart_data = await fetch_yahoo_chart(ticker, session=session)
         meta = chart_data["meta"]
         valid_closes = chart_data["valid_closes"]
 
@@ -157,7 +167,7 @@ async def fetch_jp_stock(code: str, cached_name: str = "") -> dict:
 
         name = cached_name
         if not name:
-            name = await fetch_jp_company_name(code) or meta.get("shortName") or meta.get("longName") or ""
+            name = await fetch_jp_company_name(code, session=session) or meta.get("shortName") or meta.get("longName") or ""
 
         return {
             "price": price or "",

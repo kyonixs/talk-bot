@@ -1,19 +1,55 @@
 import os
+import urllib.request
 from google.cloud import secretmanager
 
-def get_secret(secret_id, project_id=None):
+_cached_project_id = None
+_cached_client = None
+
+def _get_project_id() -> str:
+    """
+    GCPプロジェクトIDを取得する。優先順位:
+    1. 環境変数 GOOGLE_CLOUD_PROJECT（ローカル開発用）
+    2. GCP VM メタデータサーバー（本番環境で自動検出）
+    """
+    global _cached_project_id
+    if _cached_project_id:
+        return _cached_project_id
+
+    # 1. 環境変数から
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if project_id:
+        _cached_project_id = project_id
+        return project_id
+
+    # 2. GCP メタデータサーバーから自動取得
+    try:
+        req = urllib.request.Request(
+            "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+            headers={"Metadata-Flavor": "Google"}
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                _cached_project_id = resp.read().decode("utf-8")
+                return _cached_project_id
+    except Exception:
+        pass
+
+    raise ValueError(
+        "GCP Project ID could not be determined. "
+        "Set GOOGLE_CLOUD_PROJECT env var or run on a GCP VM."
+    )
+
+
+def get_secret(secret_id: str) -> str:
     """
     GCP Secret Manager からシークレットの値を取得する。
-    `project_id` が指定されていない場合は、環境変数 `GOOGLE_CLOUD_PROJECT` を使用する。
+    プロジェクトIDは自動検出される。
     """
-    if not project_id:
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        
-    if not project_id:
-        raise ValueError("GCP Project ID is not set. Please set GOOGLE_CLOUD_PROJECT environment variable.")
-
-    client = secretmanager.SecretManagerServiceClient()
+    global _cached_client
+    project_id = _get_project_id()
+    if _cached_client is None:
+        _cached_client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
-    
-    response = client.access_secret_version(request={"name": name})
+
+    response = _cached_client.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")

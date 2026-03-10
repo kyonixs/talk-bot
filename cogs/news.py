@@ -1,4 +1,3 @@
-import os
 import random
 import asyncio
 import discord
@@ -16,8 +15,8 @@ class NewsCog(commands.Cog):
         self.bot = bot
         self.gemini = GeminiService(bot.gemini_api_key)
 
-        # 環境変数からチャンネルIDを取得
-        self.channel_id = int(os.getenv("CHANNEL_ID", 0))
+        # Bot初期化時にSecret Managerから取得済みのチャンネルIDを使用
+        self.channel_id = bot.channel_id
 
         # TZを考慮したスケジュール設定用の時刻オブジェクトを作成
         self.tz = datetime.timezone(datetime.timedelta(hours=9))  # JST固定

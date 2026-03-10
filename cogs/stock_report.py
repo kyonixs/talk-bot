@@ -1,10 +1,9 @@
 import discord
 from discord.ext import commands, tasks
-import json
 import asyncio
 import traceback
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta
 from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, is_us_dst, TZ_JST
 from services.sheets_service import get_stocks_from_sheet
 from services.stock_service import fetch_us_stock, fetch_jp_stock
@@ -17,7 +16,11 @@ class StockReportCog(commands.Cog):
         # Botの初期化時に取得済みの株式用APIキー・Webhook URLを使用
         self.gemini_service = GeminiService(api_key=bot.gemini_api_key_stock)
         self.webhook_url = bot.discord_webhook_stock
-        
+        self.spreadsheet_id = bot.spreadsheet_id
+
+        # 同時実行を防ぐロック
+        self._report_lock = asyncio.Lock()
+
         # 毎分チェックのループタスクを開始
         self.check_and_run_reports.start()
         print("StockReportCog loaded and scheduler started.")
@@ -49,7 +52,6 @@ class StockReportCog(commands.Cog):
                 offset = STOCK_CONFIG.get("market_close_offset_minutes", 30)
                 # target_timeにoffset(分)を足す
                 target_dt = datetime.combine(now.date(), target_time, tzinfo=TZ_JST)
-                from datetime import timedelta
                 target_dt += timedelta(minutes=offset)
                 
                 if now.hour == target_dt.hour and now.minute == target_dt.minute:
@@ -107,12 +109,19 @@ class StockReportCog(commands.Cog):
 
     async def _run_report_workflow(self, report_name: str, market: str, weekly: bool):
         """全体のワークフロー: データ取得 -> レポート生成 -> Discord送信"""
+        if self._report_lock.locked():
+            print(f"[{report_name}] 別のレポートが実行中のためスキップ")
+            return
+
+        async with self._report_lock:
+            await self._run_report_workflow_inner(report_name, market, weekly)
+
+    async def _run_report_workflow_inner(self, report_name: str, market: str, weekly: bool):
         print(f"--- 🚀 Starting {report_name} workflow ---")
         try:
             # 1. Sheetsから銘柄リスト取得
-            sheet_id = STOCK_CONFIG["spreadsheet_id"]
-            holdings_list = await get_stocks_from_sheet("保有銘柄", sheet_id)
-            watchlist_list = await get_stocks_from_sheet("監視銘柄", sheet_id)
+            holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
+            watchlist_list = await get_stocks_from_sheet("監視銘柄", self.spreadsheet_id)
 
             # 2. Yahoo Financeから株価・企業情報を取得
             holdings_map = await self._fetch_all_stocks(holdings_list, market)
@@ -143,28 +152,29 @@ class StockReportCog(commands.Cog):
             await self.notify_error(f"{report_name} Workflow", e)
 
     async def _fetch_all_stocks(self, stock_list: list[dict], market: str) -> dict:
-        """指定されたリストの全銘柄情報を並列取得し、辞書で返す"""
+        """指定されたリストの全銘柄情報を並列取得し、辞書で返す（セッション共有）"""
         stock_map = {}
         fetch_tasks = []
 
-        async def fetch_single(stock: dict):
-            ticker = stock["ticker"]
-            try:
-                if market == "US":
-                    data = await fetch_us_stock(ticker)
-                else:
-                    data = await fetch_jp_stock(ticker)
-                
-                # dictにマージして保存
-                stock_map[ticker] = {**stock, **data}
-            except Exception as e:
-                print(f"Error fetching {ticker}: {e}")
-                stock_map[ticker] = {**stock, "price": "Error", "change": "-", "weeklyChange": "-", "name": ticker}
+        async with aiohttp.ClientSession() as session:
+            async def fetch_single(stock: dict):
+                ticker = stock["ticker"]
+                try:
+                    if market == "US":
+                        data = await fetch_us_stock(ticker, session=session)
+                    else:
+                        data = await fetch_jp_stock(ticker, session=session)
 
-        for stock in stock_list:
-            fetch_tasks.append(fetch_single(stock))
-        
-        await asyncio.gather(*fetch_tasks)
+                    # dictにマージして保存
+                    stock_map[ticker] = {**stock, **data}
+                except Exception as e:
+                    print(f"Error fetching {ticker}: {e}")
+                    stock_map[ticker] = {**stock, "price": "Error", "change": "-", "weeklyChange": "-", "name": ticker}
+
+            for stock in stock_list:
+                fetch_tasks.append(fetch_single(stock))
+
+            await asyncio.gather(*fetch_tasks)
         return stock_map
 
     # =========================================================================
@@ -223,14 +233,13 @@ class StockReportCog(commands.Cog):
         return chunks
 
     async def notify_error(self, func_name: str, error: Exception):
-        """エラー発生時にWebhookに通知する"""
-        err_msg = traceback.format_exc()
-        print(f"[ERROR] {func_name}: {err_msg}")
-        
-        text = f"🚨 **Error in Stock Report Bot** 🚨\n**Function:** `{func_name}`\n**Error:** `{str(error)}`"
-        # 1900文字で切る
-        if len(text) > 1900:
-            text = text[:1895] + "..."
+        """エラー発生時にWebhookに通知する（内部情報はログのみ）"""
+        # スタックトレースはサーバーログにのみ出力
+        print(f"[ERROR] {func_name}: {traceback.format_exc()}")
+
+        # Discordにはエラー種別と概要のみ送信（パスやモジュール名を露出しない）
+        error_type = type(error).__name__
+        text = f"🚨 **Stock Report Error** 🚨\n**処理:** {func_name}\n**種別:** {error_type}\n詳細はサーバーログを確認してください。"
             
         if self.webhook_url:
             async with aiohttp.ClientSession() as session:

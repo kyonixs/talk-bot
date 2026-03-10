@@ -4,9 +4,9 @@ services:
     container_name: news-bot
     restart: always
     environment:
-      - CHANNEL_ID=1478544261854134302
       - TZ=Asia/Tokyo
-      - GOOGLE_CLOUD_PROJECT=stockreports-489208
+      # CHANNEL_ID, SPREADSHEET_ID → Secret Manager で管理
+      # GOOGLE_CLOUD_PROJECT → VM メタデータサーバーから自動取得
     # e2-microの1GB RAMを考慮したメモリ制限
     mem_limit: 512m
     # swapを含めた最大メモリ使用量 (OS側でスワップが設定されている前提)
