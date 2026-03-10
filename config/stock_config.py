@@ -69,7 +69,7 @@ def is_holiday(date_obj, market: str) -> bool:
     """指定日付が指定市場（US/JP）の祝日（休場日）かどうか判定する"""
     year = date_obj.year
     if market == "US":
-        nyse_holidays = holidays.financial_holidays.NYSE(years=year)
+        nyse_holidays = holidays.NYSE(years=year)
         return date_obj in nyse_holidays
     elif market == "JP":
         jpn_holidays = holidays.JP(years=year)
