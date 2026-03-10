@@ -17,7 +17,7 @@ async def send_as_character(
     channel: discord.abc.Messageable,
     character: dict,
     content: str,
-    wait: bool = False,
+    wait: bool = True,
 ) -> discord.WebhookMessage | None:
     """
     Webhookを使用してキャラクターになりすましてメッセージを送信する。
