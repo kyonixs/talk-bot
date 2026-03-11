@@ -87,6 +87,15 @@ class GeminiService:
                     temperature=0.8  # 雑談なので少しクリエイティブに
                 )
             )
+
+            # Google Search Grounding使用時、response.text は複数partsを
+            # 連結するため内容が重複することがある。最初のテキストpartだけを取得する。
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.text:
+                        return part.text.strip()
+
+            # フォールバック: partsが取れない場合はresponse.textを使用
             return response.text
         except Exception as e:
             logger.error(f"Error calling Gemini API for random chat: {e}")
@@ -132,6 +141,13 @@ class GeminiService:
                     temperature=0.7
                 )
             )
+
+            # Google Search Grounding使用時の重複防止: 最初のテキストpartだけを取得
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.text:
+                        return part.text.strip()
+
             return response.text
         except Exception as e:
             logger.error(f"Error calling Gemini API for chat: {e}")
