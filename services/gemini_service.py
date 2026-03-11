@@ -5,12 +5,18 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
+# Gemini APIリクエストのタイムアウト（秒）
+_GEMINI_TIMEOUT_STOCK = 120  # 株式レポート（長文生成のため長め）
+_GEMINI_TIMEOUT_CHAT = 30    # 雑談・会話
+_GEMINI_TIMEOUT_ROUTER = 10  # ルーター（短い応答のみ）
+
+
 class GeminiService:
     def __init__(self, api_key: str):
         # 実行時に渡されたAPIキーを使用して初期化する
         if not api_key:
             raise ValueError("API key must be provided to initialize GeminiService.")
-        
+
         self.client = genai.Client(api_key=api_key)
         self.model_name = "gemini-2.5-flash"
         self.router_model_name = "gemini-2.0-flash-lite"  # Router用軽量モデル
@@ -26,14 +32,17 @@ class GeminiService:
 
         for attempt in range(max_retries):
             try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        tools=[{"google_search": {}}],
-                        temperature=0.3, # レポートなので事実ベースを強めるため低めに設定
-                        max_output_tokens=8192
-                    )
+                response = await asyncio.wait_for(
+                    self.client.aio.models.generate_content(
+                        model=self.model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            tools=[{"google_search": {}}],
+                            temperature=0.3, # レポートなので事実ベースを強めるため低めに設定
+                            max_output_tokens=8192
+                        )
+                    ),
+                    timeout=_GEMINI_TIMEOUT_STOCK,
                 )
 
                 # finish_reasonがMAX_TOKENSで途切れたか判定
@@ -78,14 +87,17 @@ class GeminiService:
         )
 
         try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=personality,
-                    tools=[{"google_search": {}}],
-                    temperature=0.8  # 雑談なので少しクリエイティブに
-                )
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=personality,
+                        tools=[{"google_search": {}}],
+                        temperature=0.8  # 雑談なので少しクリエイティブに
+                    )
+                ),
+                timeout=_GEMINI_TIMEOUT_CHAT,
             )
 
             # Google Search Grounding使用時、response.text は複数partsを
@@ -126,20 +138,23 @@ class GeminiService:
                 )
             )
 
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        personality + "\n\n"
-                        "【重要なルール】\n"
-                        "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
-                        "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
-                        "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
-                    ),
-                    tools=[{"google_search": {}}],
-                    temperature=0.7
-                )
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=(
+                            personality + "\n\n"
+                            "【重要なルール】\n"
+                            "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
+                            "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
+                            "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
+                        ),
+                        tools=[{"google_search": {}}],
+                        temperature=0.7
+                    )
+                ),
+                timeout=_GEMINI_TIMEOUT_CHAT,
             )
 
             # Google Search Grounding使用時の重複防止: 最初のテキストpartだけを取得
@@ -169,13 +184,16 @@ class GeminiService:
         )
 
         try:
-            response = await self.client.aio.models.generate_content(
-                model=self.router_model_name,
-                contents=user_message,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.2, # クリエイティビティは低くして決定論的にする
-                )
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.router_model_name,
+                    contents=user_message,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.2, # クリエイティビティは低くして決定論的にする
+                    )
+                ),
+                timeout=_GEMINI_TIMEOUT_ROUTER,
             )
             result = response.text.strip()
             
