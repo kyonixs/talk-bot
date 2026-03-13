@@ -21,50 +21,61 @@ class GeminiService:
         self.model_name = "gemini-2.5-flash"
         self.router_model_name = "gemini-2.0-flash-lite"  # Router用軽量モデル
 
-    async def generate_stock_report(self, prompt: str) -> dict:
+    async def generate_stock_report(self, prompt_data: dict) -> dict:
         """
-        株式レポート生成用。Google Search Grounding を使用し、
-        エラー時は最大3回までリトライする。長文出力用に上限を調整。
-        戻り値: {"text": str, "truncated": bool}
+        株式レポート生成用。Google Search Grounding を使用。
+        prompt_data: {"system_instruction": str, "user_prompt": str}
         """
         max_retries = 3
-        retry_delay = 5 # 初回リトライ待ち時間(秒)
+        retry_delay = 5
+
+        system_instruction = prompt_data.get("system_instruction")
+        user_prompt = prompt_data.get("user_prompt")
 
         for attempt in range(max_retries):
             try:
                 response = await asyncio.wait_for(
                     self.client.aio.models.generate_content(
                         model=self.model_name,
-                        contents=prompt,
+                        contents=user_prompt,
                         config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
                             tools=[{"google_search": {}}],
-                            temperature=0.3, # レポートなので事実ベースを強めるため低めに設定
+                            temperature=0.3,
                             max_output_tokens=8192
                         )
                     ),
                     timeout=_GEMINI_TIMEOUT_STOCK,
                 )
 
+                # 重複防止: 最初のテキストパートを取得
+                text = ""
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.text:
+                            text = part.text.strip()
+                            break
+                if not text:
+                    text = response.text
+
                 # finish_reasonがMAX_TOKENSで途切れたか判定
                 is_truncated = False
                 try:
                     if response.candidates and response.candidates[0].finish_reason:
-                        # enum値か大文字文字列で返る場合がある
                         reason = str(response.candidates[0].finish_reason).upper()
                         if "MAX_TOKENS" in reason:
                             is_truncated = True
                 except Exception:
                     pass
 
-                return {"text": response.text, "truncated": is_truncated}
+                return {"text": text, "truncated": is_truncated}
 
             except Exception as e:
                 logger.error(f"Gemini API Error (Attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2 # 指数バックオフ
+                    retry_delay *= 2
                 else:
-                    logger.error("Max retries reached. Reporting failure.")
                     raise e
 
     async def generate_random_chat(self, personality: str, topics: str) -> str | None:

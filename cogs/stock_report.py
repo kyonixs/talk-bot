@@ -161,17 +161,17 @@ class StockReportCog(commands.Cog):
                     fetch_market_indices(market, session=session),
                 )
 
-            # 3. プロンプト生成（指数データ付き）
+            # 3. プロンプト生成（指数データ付き、戻り値は {"system_instruction": s, "user_prompt": u} の dict）
             if market == "US":
-                prompt = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
+                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
                     else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices)
             else:
-                prompt = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
+                prompt_data = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
                     else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices)
 
             # 4. Gemini でレポート生成
             logger.info(f"Generating {report_name} using Gemini...")
-            ai_result = await self.gemini_service.generate_stock_report(prompt)
+            ai_result = await self.gemini_service.generate_stock_report(prompt_data)
             result_text = ai_result.get("text", "")
             if ai_result.get("truncated"):
                 result_text += "\n\n*(※文字数制限により途切れています)*"
