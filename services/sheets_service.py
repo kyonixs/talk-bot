@@ -55,9 +55,27 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
 async def get_stocks_from_sheet(sheet_name: str, spreadsheet_id: str) -> list[dict]:
     """
     イベントループをブロックしないよう、同期API呼び出しを別スレッドで実行する。
+    一時的なエラーに対して最大3回リトライする。
     """
-    try:
-        return await asyncio.to_thread(_fetch_from_sheet_sync, sheet_name, spreadsheet_id)
-    except Exception as e:
-        logger.error(f"Error reading from sheet {sheet_name}: {e}")
-        raise e
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.to_thread(_fetch_from_sheet_sync, sheet_name, spreadsheet_id)
+        except Exception as e:
+            # HttpError (429, 500, 503 等) や一時的なネットワークエラーを想定
+            is_retriable = False
+            error_msg = str(e)
+            
+            # HttpError のステータスコードを確認 (googleapiclient.errors.HttpError)
+            if hasattr(e, 'resp') and hasattr(e.resp, 'status'):
+                status = e.resp.status
+                if status in [429, 500, 502, 503, 504]:
+                    is_retriable = True
+            
+            if is_retriable and attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"Retry reading sheet {sheet_name} (attempt {attempt + 1}/{max_retries}) after {wait_time}s due to: {error_msg}")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Error reading from sheet {sheet_name}: {e}")
+                raise e

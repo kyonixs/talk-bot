@@ -5,7 +5,7 @@ import asyncio
 import traceback
 import aiohttp
 from datetime import datetime, timedelta
-from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, is_us_dst, TZ_JST
+from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, TZ_JST
 from services.sheets_service import get_stocks_from_sheet
 from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices
 from services.gemini_service import GeminiService
@@ -32,10 +32,10 @@ class StockReportCog(commands.Cog):
         self.check_and_run_reports.start()
         logger.info("StockReportCog loaded and scheduler started.")
 
-    def cog_unload(self):
+    async def cog_unload(self):
         self.check_and_run_reports.cancel()
         if self._webhook_session and not self._webhook_session.closed:
-            asyncio.create_task(self._webhook_session.close())
+            await self._webhook_session.close()
         logger.info("StockReportCog unloaded and scheduler stopped.")
 
     async def _get_webhook_session(self) -> aiohttp.ClientSession:
@@ -153,11 +153,11 @@ class StockReportCog(commands.Cog):
             holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
             watchlist_list = await get_stocks_from_sheet("監視銘柄", self.spreadsheet_id)
 
-            # 2. Yahoo Financeから株価・企業情報 + 主要指数を並列取得
+            # 2. Yahoo Financeから株価・企業情報 + 主要指数を並列取得（セッション共有）
             async with aiohttp.ClientSession() as session:
                 holdings_map, watchlist_map, indices = await asyncio.gather(
-                    self._fetch_all_stocks(holdings_list, market),
-                    self._fetch_all_stocks(watchlist_list, market),
+                    self._fetch_all_stocks(holdings_list, market, session),
+                    self._fetch_all_stocks(watchlist_list, market, session),
                     fetch_market_indices(market, session=session),
                 )
 
@@ -184,12 +184,16 @@ class StockReportCog(commands.Cog):
         except Exception as e:
             await self.notify_error(f"{report_name} Workflow", e)
 
-    async def _fetch_all_stocks(self, stock_list: list[dict], market: str) -> dict:
-        """指定されたリストの全銘柄情報を並列取得し、辞書で返す（セッション共有）"""
+    async def _fetch_all_stocks(self, stock_list: list[dict], market: str,
+                                session: aiohttp.ClientSession = None) -> dict:
+        """指定されたリストの全銘柄情報を並列取得し、辞書で返す"""
         stock_map = {}
         fetch_tasks = []
+        owns_session = session is None
+        if owns_session:
+            session = aiohttp.ClientSession()
 
-        async with aiohttp.ClientSession() as session:
+        try:
             async def fetch_single(stock: dict):
                 ticker = stock["ticker"]
                 try:
@@ -208,6 +212,9 @@ class StockReportCog(commands.Cog):
                 fetch_tasks.append(fetch_single(stock))
 
             await asyncio.gather(*fetch_tasks)
+        finally:
+            if owns_session:
+                await session.close()
         return stock_map
 
     # =========================================================================
@@ -301,23 +308,27 @@ class StockReportCog(commands.Cog):
         chunks = self._chunk_message(text, 1900)
         for i, chunk in enumerate(chunks):
             content = f"(続き {i + 1})\n{chunk}" if i > 0 else chunk
-            try:
-                await webhook.send(
-                    content=content,
-                    username=webhook_user,
-                    avatar_url=avatar_url,
-                    thread=thread,
-                    wait=True,
-                )
-            except discord.HTTPException as e:
-                if e.status == 429:
-                    retry_after = getattr(e, "retry_after", 2)
-                    logger.warning(f"Rate limited. Waiting {retry_after}s...")
-                    await asyncio.sleep(retry_after)
-                else:
-                    logger.error(f"Webhook error in thread: {e}")
-            except Exception as e:
-                logger.error(f"Failed to post to thread: {e}")
+            for retry in range(3):  # 最大3回リトライ
+                try:
+                    await webhook.send(
+                        content=content,
+                        username=webhook_user,
+                        avatar_url=avatar_url,
+                        thread=thread,
+                        wait=True,
+                    )
+                    break  # 送信成功
+                except discord.HTTPException as e:
+                    if e.status == 429 and retry < 2:
+                        retry_after = getattr(e, "retry_after", 2)
+                        logger.warning(f"Rate limited. Waiting {retry_after}s... (retry {retry + 1})")
+                        await asyncio.sleep(retry_after)
+                    else:
+                        logger.error(f"Webhook error in thread: {e}")
+                        break
+                except Exception as e:
+                    logger.error(f"Failed to post to thread: {e}")
+                    break
 
             if i < len(chunks) - 1:
                 await asyncio.sleep(1)
@@ -377,13 +388,28 @@ class StockReportCog(commands.Cog):
 
         # Discordにはエラー種別と概要のみ送信（パスやモジュール名を露出しない）
         error_type = type(error).__name__
-        text = f"🚨 **Stock Report Error** 🚨\n**処理:** {func_name}\n**種別:** {error_type}\n詳細はサーバーログを確認してください。"
+        error_details = ""
+        
+        # HttpError の場合は詳細情報を抽出
+        if error_type == "HttpError" and hasattr(error, 'resp') and hasattr(error, 'content'):
+            try:
+                import json
+                status = error.resp.status
+                reason = error.resp.reason
+                # content から具体的なメッセージを抽出を試みる
+                content = json.loads(error.content.decode('utf-8'))
+                message = content.get('error', {}).get('message', str(error))
+                error_details = f"\n**詳細:** {status} {reason}\n**メッセージ:** {message}"
+            except Exception:
+                error_details = f"\n**詳細:** {str(error)}"
+
+        text = f"🚨 **Stock Report Error** 🚨\n**処理:** {func_name}\n**種別:** {error_type}{error_details}\n詳細はサーバーログを確認してください。"
 
         if self.webhook_url:
-            session = await self._get_webhook_session()
-            payload = {"content": text, "username": "エラー監視"}
             try:
-                await session.post(self.webhook_url, json=payload)
+                session = await self._get_webhook_session()
+                webhook = discord.Webhook.from_url(self.webhook_url, session=session)
+                await webhook.send(content=text, username="エラー監視")
             except Exception as push_err:
                 logger.error(f"Failed to push error log to webhook: {push_err}")
 
