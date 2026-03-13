@@ -107,6 +107,12 @@ class ChatCog(commands.Cog):
             return
         self._user_cooldowns[message.author.id] = now
 
+        # 古いクールダウンエントリを定期的に掃除（100件超過時）
+        if len(self._user_cooldowns) > 100:
+            expired = [uid for uid, ts in self._user_cooldowns.items() if now - ts > 60]
+            for uid in expired:
+                del self._user_cooldowns[uid]
+
         thread_name = message.channel.name if is_in_thread else ""
         content_clean = message.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
 
@@ -139,9 +145,10 @@ class ChatCog(commands.Cog):
                 if len(history) > self.MAX_HISTORY * 2:
                     del history[:len(history) - self.MAX_HISTORY * 2]
 
-                # Webhookでなりすまし送信（失敗時は通常replyにフォールバック）
+                # Webhookでなりすまし送信
                 result = await send_as_character(message.channel, target_char, response_text)
                 if result is None:
+                    logger.warning("send_as_character returned None, using fallback reply.")
                     await message.reply(response_text[:2000])
 
             except Exception as e:
@@ -206,6 +213,17 @@ class ChatCog(commands.Cog):
                 "- ニュース配信チャンネル内で自由に発言 → AIが最適なキャラを自動選択\n"
                 "- ニュース配信のスレッド内で返信 → そのスレッドのキャラが応答\n"
                 "- Botをメンションして話しかける"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="📊 株式レポート（自動配信）",
+            value=(
+                "- 米国株 日次: 平日 市場閉場後（夏05:30 / 冬06:30 JST）\n"
+                "- 日本株 日次: 平日 15:30 JST\n"
+                "- 週次レポート: 毎週土曜（米国15:00 / 日本14:00 JST）\n"
+                "- 主要指数 + AI分析がスレッドで届きます"
             ),
             inline=False
         )

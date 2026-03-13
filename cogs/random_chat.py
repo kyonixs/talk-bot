@@ -1,11 +1,11 @@
 import random
 import asyncio
 import logging
-import discord
 from discord.ext import commands, tasks
-import datetime
+from datetime import datetime as dt
 
 from config.characters import CHARACTERS
+from config.stock_config import TZ_JST
 from services.gemini_service import GeminiService
 from services.webhook_service import send_as_character
 
@@ -22,9 +22,6 @@ class RandomChatCog(commands.Cog):
         # Bot初期化時にSecret Managerから取得済みのチャンネルIDを使用
         self.channel_id = bot.channel_id
 
-        # TZを考慮したスケジュール設定用の時刻オブジェクトを作成
-        self.tz = datetime.timezone(datetime.timedelta(hours=9))  # JST固定
-
         # ランダム雑談で今日すでに話しかけたキャラを記録
         self._today_chatted = set()  # キャラ名のセット
         self._today_date = None      # 日付追跡用
@@ -40,13 +37,15 @@ class RandomChatCog(commands.Cog):
     @tasks.loop(minutes=90)
     async def random_chat(self):
         """ランダムなタイミングでキャラクターが自発的に話しかける（8〜21時JST限定）"""
-        await self.bot.wait_until_ready()
+        # ループ間隔にジッター（0〜30分）を追加して機械的にならないようにする
+        jitter = random.randint(0, 30 * 60)
+        await asyncio.sleep(jitter)
 
         if not self.channel_id:
             return
 
         # 現在のJST時刻を取得
-        now_jst = datetime.datetime.now(self.tz)
+        now_jst = dt.now(TZ_JST)
 
         # 8:00〜21:00 の範囲外なら何もしない
         if not (8 <= now_jst.hour < 21):

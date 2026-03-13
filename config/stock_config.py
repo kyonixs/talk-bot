@@ -17,7 +17,7 @@ STOCK_CONFIG = {
         "us_daily": {
             "market_close_et": time(16, 0),  # NYSE/NASDAQ 閉場 16:00 ET
             "weekdays_only": True,
-            "skip_holidays": "US",           # holidays.US() で判定
+            "skip_holidays": "US",           # holidays.NYSE() で判定
         },
         "us_weekly": {
             "hour": 15,                      # 土曜 15:00 JST 固定

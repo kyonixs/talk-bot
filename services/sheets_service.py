@@ -9,14 +9,16 @@ logger = logging.getLogger(__name__)
 _cached_service = None
 
 
-def _get_sheets_service():
+def _get_sheets_service(force_refresh: bool = False):
     """Google Sheets APIサービスを取得（キャッシュ済みなら再利用）"""
     global _cached_service
-    if _cached_service is None:
+    if _cached_service is None or force_refresh:
         credentials, project = google.auth.default(
             scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
         )
         _cached_service = build('sheets', 'v4', credentials=credentials)
+        if force_refresh:
+            logger.info("Sheets API service refreshed (credentials renewed)")
     return _cached_service
 
 
@@ -65,13 +67,21 @@ async def get_stocks_from_sheet(sheet_name: str, spreadsheet_id: str) -> list[di
             # HttpError (429, 500, 503 等) や一時的なネットワークエラーを想定
             is_retriable = False
             error_msg = str(e)
-            
+
             # HttpError のステータスコードを確認 (googleapiclient.errors.HttpError)
             if hasattr(e, 'resp') and hasattr(e.resp, 'status'):
                 status = e.resp.status
                 if status in [429, 500, 502, 503, 504]:
                     is_retriable = True
-            
+                elif status in [401, 403]:
+                    # 認証トークン期限切れの可能性 → サービスを再構築してリトライ
+                    _get_sheets_service(force_refresh=True)
+                    is_retriable = True
+
+            # ネットワーク系エラーもリトライ対象
+            if isinstance(e, (OSError, TimeoutError, ConnectionError)):
+                is_retriable = True
+
             if is_retriable and attempt < max_retries - 1:
                 wait_time = (attempt + 1) * 2
                 logger.warning(f"Retry reading sheet {sheet_name} (attempt {attempt + 1}/{max_retries}) after {wait_time}s due to: {error_msg}")

@@ -56,7 +56,10 @@ class GeminiService:
                             text = part.text.strip()
                             break
                 if not text:
-                    text = response.text
+                    try:
+                        text = response.text
+                    except (ValueError, AttributeError):
+                        raise RuntimeError("Gemini returned no valid text in response")
 
                 # finish_reasonがMAX_TOKENSで途切れたか判定
                 is_truncated = False
@@ -119,7 +122,11 @@ class GeminiService:
                         return part.text.strip()
 
             # フォールバック: partsが取れない場合はresponse.textを使用
-            return response.text
+            try:
+                return response.text
+            except (ValueError, AttributeError):
+                logger.warning("Gemini returned no valid text for random chat")
+                return None
         except Exception as e:
             logger.error(f"Error calling Gemini API for random chat: {e}")
             return None  # エラー時はNoneを返し、呼び出し元で処理
@@ -174,7 +181,10 @@ class GeminiService:
                     if part.text:
                         return part.text.strip()
 
-            return response.text
+            try:
+                return response.text
+            except (ValueError, AttributeError):
+                return "ごめんね、今ちょっと頭回ってないかも。もう一回言ってくれる？"
         except Exception as e:
             logger.error(f"Error calling Gemini API for chat: {e}")
             return "ごめんね、今ちょっと頭回ってないかも。もう一回言ってくれる？"

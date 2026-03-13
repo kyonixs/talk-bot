@@ -35,7 +35,7 @@ class NewsBot(commands.Bot):
 
     async def setup_hook(self):
         # 起動時にCogを読み込む
-        cogs = ["cogs.news", "cogs.chat", "cogs.stock_report"]
+        cogs = ["cogs.random_chat", "cogs.chat", "cogs.stock_report"]
         for cog in cogs:
             try:
                 await self.load_extension(cog)

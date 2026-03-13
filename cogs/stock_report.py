@@ -148,6 +148,7 @@ class StockReportCog(commands.Cog):
 
     async def _run_report_workflow_inner(self, report_name: str, market: str, weekly: bool):
         logger.info(f"--- Starting {report_name} workflow ---")
+        start_time = asyncio.get_event_loop().time()
         try:
             # 1. Sheetsから銘柄リスト取得
             holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
@@ -179,9 +180,12 @@ class StockReportCog(commands.Cog):
             # 5. Discord Webhook へ送信（Embedヘッダー + 本文テキスト）
             await self.send_stock_report(result_text, report_name, indices)
 
-            logger.info(f"--- {report_name} workflow finished ---")
+            elapsed = asyncio.get_event_loop().time() - start_time
+            logger.info(f"--- {report_name} workflow finished in {elapsed:.1f}s ---")
 
         except Exception as e:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            logger.error(f"--- {report_name} workflow failed after {elapsed:.1f}s ---")
             await self.notify_error(f"{report_name} Workflow", e)
 
     async def _fetch_all_stocks(self, stock_list: list[dict], market: str,
@@ -339,15 +343,26 @@ class StockReportCog(commands.Cog):
         chunks = self._chunk_message(text, 1900)
         for i, chunk in enumerate(chunks):
             content = f"(続き {i + 1})\n{chunk}" if i > 0 else chunk
-            try:
-                await webhook.send(
-                    content=content,
-                    username=username,
-                    avatar_url=avatar_url,
-                    wait=True,
-                )
-            except Exception as e:
-                logger.error(f"Flat send error: {e}")
+            for retry in range(3):
+                try:
+                    await webhook.send(
+                        content=content,
+                        username=username,
+                        avatar_url=avatar_url,
+                        wait=True,
+                    )
+                    break
+                except discord.HTTPException as e:
+                    if e.status == 429 and retry < 2:
+                        retry_after = getattr(e, "retry_after", 2)
+                        logger.warning(f"Rate limited (flat). Waiting {retry_after}s... (retry {retry + 1})")
+                        await asyncio.sleep(retry_after)
+                    else:
+                        logger.error(f"Flat send error: {e}")
+                        break
+                except Exception as e:
+                    logger.error(f"Flat send error: {e}")
+                    break
             if i < len(chunks) - 1:
                 await asyncio.sleep(1)
 
