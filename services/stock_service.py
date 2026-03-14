@@ -1,6 +1,5 @@
 import logging
 import aiohttp
-import asyncio
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -81,7 +80,7 @@ async def fetch_market_indices(market: str, session: aiohttp.ClientSession = Non
             if len(closes) >= 2:
                 current = closes[-1]
                 prev = closes[-2]
-                pct = ((current - prev) / prev) * 100 if prev else 0
+                pct = ((current - prev) / prev) * 100 if prev is not None and prev != 0 else 0
                 sign = "+" if pct >= 0 else ""
                 results[label] = {
                     "value": round(current, 2),
@@ -109,12 +108,12 @@ async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.Cl
         previous_close = valid_closes[-2] if len(valid_closes) >= 2 else meta.get("previousClose")
 
         change_pct_str = ""
-        if price and previous_close and previous_close != 0:
+        if price is not None and previous_close is not None and previous_close != 0:
             pct = ((price - previous_close) / previous_close) * 100
             sign = "+" if pct >= 0 else ""
             change_pct_str = f"{sign}{pct:.2f}%"
 
-        if price:
+        if price is not None:
             price = round(price, 2)
 
         # 週間変動の計算
@@ -122,7 +121,7 @@ async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.Cl
         if len(valid_closes) >= 2:
             week_start = valid_closes[0]
             week_end = valid_closes[-1]
-            if week_start and week_end and week_start != 0:
+            if week_start is not None and week_end is not None and week_start != 0:
                 pct_w = ((week_end - week_start) / week_start) * 100
                 sign_w = "+" if pct_w >= 0 else ""
                 weekly_change_pct_str = f"{sign_w}{pct_w:.2f}%"
@@ -130,7 +129,7 @@ async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.Cl
         name = cached_name or meta.get("shortName") or meta.get("longName") or ""
 
         return {
-            "price": price or "",
+            "price": price if price is not None else "",
             "change": change_pct_str,
             "weeklyChange": weekly_change_pct_str,
             "name": name
@@ -189,12 +188,12 @@ async def fetch_jp_stock(code: str, cached_name: str = "", session: aiohttp.Clie
         previous_close = valid_closes[-2] if len(valid_closes) >= 2 else meta.get("previousClose")
 
         change_pct_str = ""
-        if price and previous_close and previous_close != 0:
+        if price is not None and previous_close is not None and previous_close != 0:
             pct = ((price - previous_close) / previous_close) * 100
             sign = "+" if pct >= 0 else ""
             change_pct_str = f"{sign}{pct:.2f}%"
 
-        if price:
+        if price is not None:
             # 日本株は小数第1位まで
             price = round(price, 1)
 
@@ -203,7 +202,7 @@ async def fetch_jp_stock(code: str, cached_name: str = "", session: aiohttp.Clie
         if len(valid_closes) >= 2:
             week_start = valid_closes[0]
             week_end = valid_closes[-1]
-            if week_start and week_end and week_start != 0:
+            if week_start is not None and week_end is not None and week_start != 0:
                 pct_w = ((week_end - week_start) / week_start) * 100
                 sign_w = "+" if pct_w >= 0 else ""
                 weekly_change_pct_str = f"{sign_w}{pct_w:.2f}%"
@@ -213,7 +212,7 @@ async def fetch_jp_stock(code: str, cached_name: str = "", session: aiohttp.Clie
             name = await fetch_jp_company_name(code, session=session) or meta.get("shortName") or meta.get("longName") or ""
 
         return {
-            "price": price or "",
+            "price": price if price is not None else "",
             "change": change_pct_str,
             "weeklyChange": weekly_change_pct_str,
             "name": name

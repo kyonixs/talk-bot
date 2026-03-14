@@ -12,9 +12,9 @@ COPY . .
 # timezoneを環境変数で上書きできるようにしつつ、デフォルトをJSTに
 ENV TZ=Asia/Tokyo
 
-# ヘルスチェック: bot.pyプロセスが生存しているか確認
+# ヘルスチェック: PID 1 (bot.py) の生存確認（追加パッケージ不要）
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
-    CMD pgrep -f "python bot.py" > /dev/null || exit 1
+    CMD python -c "import os; os.kill(1, 0)" || exit 1
 
 # Botの起動
 CMD ["python", "bot.py"]

@@ -29,7 +29,7 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
     """
     service = _get_sheets_service()
 
-    range_name = f"{sheet_name}!A:B"
+    range_name = f"'{sheet_name}'!A:B"
     sheet = service.spreadsheets()
     result = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
 

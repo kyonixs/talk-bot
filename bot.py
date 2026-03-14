@@ -27,11 +27,20 @@ class NewsBot(commands.Bot):
 
         # Secret Managerからシークレット・設定値を取得
         logger.info("Fetching secrets from GCP Secret Manager...")
-        self.gemini_api_key = get_secret("GEMINI_API_KEY_CHAT")
-        self.gemini_api_key_stock = get_secret("GEMINI_API_KEY_STOCK")
-        self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_URL_STOCK")
-        self.channel_id = int(get_secret("DISCORD_CHANNEL_ID_CHAT"))
-        self.spreadsheet_id = get_secret("GOOGLE_SPREADSHEET_ID_STOCK")
+        try:
+            self.gemini_api_key = get_secret("GEMINI_API_KEY_CHAT")
+            self.gemini_api_key_stock = get_secret("GEMINI_API_KEY_STOCK")
+            self.discord_webhook_stock = get_secret("DISCORD_WEBHOOK_URL_STOCK")
+            self.spreadsheet_id = get_secret("GOOGLE_SPREADSHEET_ID_STOCK")
+
+            channel_id_raw = get_secret("DISCORD_CHANNEL_ID_CHAT")
+            try:
+                self.channel_id = int(channel_id_raw)
+            except ValueError:
+                raise ValueError(f"DISCORD_CHANNEL_ID_CHAT is not a valid integer: {channel_id_raw!r}")
+        except Exception as e:
+            logger.error(f"Failed to retrieve secrets: {e}")
+            raise
 
     async def setup_hook(self):
         # 起動時にCogを読み込む

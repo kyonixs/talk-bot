@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from google import genai
 from google.genai import types
 
@@ -81,15 +82,27 @@ class GeminiService:
                 else:
                     raise e
 
-    async def generate_random_chat(self, personality: str, topics: str) -> str | None:
+    async def generate_random_chat(self, personality: str, topics: str, trending_context: str = "") -> str | None:
         """
         ランダム雑談用。Google Search Grounding で最新の話題を1つ拾い、
         友達にふと話しかけるような自然な雑談メッセージを生成する。
+        trending_context が渡された場合、バズっている話題を優先的に選ぶ。
         """
-        prompt = (
+        prompt_parts = [
             f"今日は日本の現在の日付です。Google検索を使って、以下のトピックに関連する最新の話題やニュースを1つだけ調べてください:\n"
-            f"{topics}\n\n"
-            "調べた結果をもとに、友達のグループチャットにふと話しかけるような自然な雑談メッセージを書いてください。\n"
+            f"{topics}\n"
+        ]
+
+        if trending_context:
+            prompt_parts.append(
+                f"\n以下は今まさにネットでバズっている話題のリストです。"
+                f"この中から、あなたの担当ジャンル（{topics}）に関係するものを1つ選んで話題にしてください。"
+                f"リストにピッタリなものがなければ、Google検索で見つけた別の話題でもOKです:\n\n"
+                f"{trending_context}\n"
+            )
+
+        prompt_parts.append(
+            "\n調べた結果をもとに、友達のグループチャットにふと話しかけるような自然な雑談メッセージを書いてください。\n"
             "ルール:\n"
             "- ネタは1つだけピックアップする\n"
             "- 「そういえばさ〜」「ちょっと聞いてよ」「ねぇ知ってる？」のような自然な切り出し方をする\n"
@@ -98,7 +111,10 @@ class GeminiService:
             "- **全体で100〜200文字に収めること（厳守）**\n"
             "- URLは不要。つけない\n"
             "- ニュースの正確性は調べた結果に忠実にすること\n"
+            "- できるだけ「今バズっている」「みんな話題にしている」系のホットな話題を選ぶこと\n"
         )
+
+        prompt = "".join(prompt_parts)
 
         try:
             response = await asyncio.wait_for(
@@ -193,6 +209,8 @@ class GeminiService:
         """
         ユーザーのメッセージ内容から、最も適任なキャラクター名を判定する。
         """
+        valid_names = ["タケシ", "アカリ先輩", "ゆうた", "れな"]
+
         system_instruction = (
             "あなたはチャットボットのルーターです。ユーザーのメッセージ内容を分析し、以下の4人のうち最も返答に適したキャラクターの名前を1つだけ出力してください。\n"
             "- タケシ (エンタメ、芸能、スポーツ担当。チャラい)\n"
@@ -200,8 +218,11 @@ class GeminiService:
             "- ゆうた (アニメ、ゲーム、サブカル、豆知識担当。オタク)\n"
             "- れな (美容、恋愛、ファッション、人間関係担当。ギャル)\n\n"
             "出力ルール:\n"
-            "「タケシ」「アカリ先輩」「ゆうた」「れな」のいずれか1つの文字列のみを出力すること。理由や余計な記号は含めないでください。\n"
-            "どれにも当てはまらない一般的な雑談の場合は、テンションや相性に最も近いものを選んでください。"
+            "「タケシ」「アカリ先輩」「ゆうた」「れな」のいずれか1つの文字列のみを出力すること。理由や余計な記号は含めないでください。\n\n"
+            "振り分けルール:\n"
+            "- メッセージの話題が各キャラの担当ジャンルに該当する場合は、そのキャラを選ぶこと。\n"
+            "- どのキャラの担当ジャンルにも明確に該当しない一般的な雑談の場合は、4人の中からランダムに選ぶこと。特定のキャラに偏らないようにすること。\n"
+            "- 挨拶や短い相槌（「おはよう」「ただいま」「暇だ」等）は一般的な雑談として扱い、毎回異なるキャラを選ぶこと。\n"
         )
 
         try:
@@ -211,18 +232,22 @@ class GeminiService:
                     contents=user_message,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        temperature=0.2, # クリエイティビティは低くして決定論的にする
+                        temperature=0.5,  # 一般的な雑談での多様性を確保
                     )
                 ),
                 timeout=_GEMINI_TIMEOUT_ROUTER,
             )
             result = response.text.strip()
-            
-            valid_names = ["タケシ", "アカリ先輩", "ゆうた", "れな"]
+            logger.info(f"[AIルーター] 入力: '{user_message[:50]}' → 結果: '{result}'")
+
             for name in valid_names:
                 if name in result:
                     return name
-            return "タケシ" # デフォルト
+
+            # ルーターが有効な名前を返さなかった場合、ランダムに選択
+            logger.warning(f"[AIルーター] 有効な名前が含まれていません: '{result}' → ランダム選択")
+            return random.choice(valid_names)
         except Exception as e:
-            logger.error(f"Router Error: {e}")
-            return "タケシ"
+            logger.error(f"[AIルーター] エラー: {e} → ランダム選択にフォールバック")
+            return random.choice(valid_names)
+

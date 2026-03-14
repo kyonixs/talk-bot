@@ -148,19 +148,33 @@ class StockReportCog(commands.Cog):
 
     async def _run_report_workflow_inner(self, report_name: str, market: str, weekly: bool):
         logger.info(f"--- Starting {report_name} workflow ---")
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
         try:
             # 1. Sheetsから銘柄リスト取得
             holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
             watchlist_list = await get_stocks_from_sheet("監視銘柄", self.spreadsheet_id)
 
+            if not holdings_list and not watchlist_list:
+                logger.warning(f"{report_name}: スプレッドシートに銘柄データがありません。レポートを中止します。")
+                return
+
             # 2. Yahoo Financeから株価・企業情報 + 主要指数を並列取得（セッション共有）
             async with aiohttp.ClientSession() as session:
-                holdings_map, watchlist_map, indices = await asyncio.gather(
+                results = await asyncio.gather(
                     self._fetch_all_stocks(holdings_list, market, session),
                     self._fetch_all_stocks(watchlist_list, market, session),
                     fetch_market_indices(market, session=session),
+                    return_exceptions=True,
                 )
+
+                # 個別タスクの例外をチェック
+                task_names = ["保有銘柄取得", "監視銘柄取得", "指数取得"]
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"{report_name}: {task_names[i]}に失敗: {result}")
+                        raise result
+
+                holdings_map, watchlist_map, indices = results
 
             # 3. プロンプト生成（指数データ付き、戻り値は {"system_instruction": s, "user_prompt": u} の dict）
             if market == "US":
@@ -180,11 +194,11 @@ class StockReportCog(commands.Cog):
             # 5. Discord Webhook へ送信（Embedヘッダー + 本文テキスト）
             await self.send_stock_report(result_text, report_name, indices)
 
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_running_loop().time() - start_time
             logger.info(f"--- {report_name} workflow finished in {elapsed:.1f}s ---")
 
         except Exception as e:
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_running_loop().time() - start_time
             logger.error(f"--- {report_name} workflow failed after {elapsed:.1f}s ---")
             await self.notify_error(f"{report_name} Workflow", e)
 

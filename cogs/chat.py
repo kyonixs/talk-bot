@@ -21,7 +21,7 @@ class ChatCog(commands.Cog):
 
         # 会話履歴を保持するインメモリ辞書（LRU方式で古いエントリを自動削除）
         # キー: thread_id または channel_id
-        # 値: {"messages": [...], "last_used": timestamp}
+        # 値: [{"role": "user"|"model", "content": str}, ...]
         self.history = OrderedDict()
         self.MAX_HISTORY = 5
         self.MAX_CONTEXTS = 100  # 最大保持コンテキスト数
@@ -51,7 +51,22 @@ class ChatCog(commands.Cog):
                 return char_data
         return None
 
-    async def _get_target_character(self, message_content: str, thread_name: str = ""):
+    async def _find_character_from_thread(self, thread: discord.Thread) -> dict | None:
+        """スレッド内の直近Webhookメッセージからキャラクターを特定する"""
+        try:
+            # スレッド内の直近メッセージを取得して、Webhook送信メッセージを探す
+            async for msg in thread.history(limit=20):
+                if msg.webhook_id:
+                    # Webhookメッセージの author.display_name はキャラクター名
+                    char = self._find_character(msg.author.display_name)
+                    if char:
+                        logger.debug(f"[スレッドキャラ特定] {char['name']} をWebhook履歴から検出")
+                        return char
+        except Exception as e:
+            logger.warning(f"[スレッドキャラ特定] 履歴取得エラー: {e}")
+        return None
+
+    async def _get_target_character(self, message_content: str, thread_name: str = "", thread: discord.Thread = None):
         """メッセージ内容またはスレッド名からキャラクターを特定する"""
 
         # 1. メッセージ内での明示的なメンション/名前指定からの推測
@@ -60,13 +75,20 @@ class ChatCog(commands.Cog):
             if char:
                 return char
 
-        # 2. スレッド名からの推測 (定時配信で作られたスレッドを想定)
+        # 2. スレッド内のWebhookメッセージからキャラクターを特定
+        #    （キャラのWebhook発言が存在するスレッドでは、そのキャラが応答すべき）
+        if thread is not None:
+            char = await self._find_character_from_thread(thread)
+            if char:
+                return char
+
+        # 3. スレッド名からの推測 (定時配信で作られたスレッドを想定)
         if thread_name:
             char = self._find_character(thread_name)
             if char:
                 return char
 
-        # 3. 指定がない場合はAIルーターによる自動振り分け
+        # 4. 指定がない場合はAIルーターによる自動振り分け
         routed_name = await self.gemini.determine_character(message_content)
         char = self._find_character(routed_name)
         if char:
@@ -119,8 +141,9 @@ class ChatCog(commands.Cog):
         if not content_clean:
             return
 
-        # キャラクターの特定 (AI Router 経由)
-        target_char = await self._get_target_character(content_clean, thread_name)
+        # キャラクターの特定（スレッド内ではWebhook履歴から、それ以外はAI Router経由）
+        thread_obj = message.channel if is_in_thread else None
+        target_char = await self._get_target_character(content_clean, thread_name, thread=thread_obj)
 
         # 会話コンテキストの管理キー
         context_key = message.channel.id

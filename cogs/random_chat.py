@@ -7,6 +7,7 @@ from datetime import datetime as dt
 from config.characters import CHARACTERS
 from config.stock_config import TZ_JST
 from services.gemini_service import GeminiService
+from services.trending_service import fetch_trending_context
 from services.webhook_service import send_as_character
 
 logger = logging.getLogger(__name__)
@@ -80,10 +81,20 @@ class RandomChatCog(commands.Cog):
             return
 
         try:
+            # トレンドデータを事前取得（失敗しても既存動作で続行）
+            trending_context = ""
+            try:
+                trending_context = await fetch_trending_context(char_data["description"])
+                if trending_context:
+                    logger.info(f"[ランダム雑談] トレンドデータ取得成功 ({len(trending_context)} chars)")
+            except Exception as e:
+                logger.warning(f"[ランダム雑談] トレンドデータ取得失敗（続行します）: {e}")
+
             # キャラの担当ジャンルで最新の話題を検索して雑談メッセージを生成
             response = await self.gemini.generate_random_chat(
                 personality=char_data["personality"],
-                topics=char_data["description"]
+                topics=char_data["description"],
+                trending_context=trending_context,
             )
 
             if not response:

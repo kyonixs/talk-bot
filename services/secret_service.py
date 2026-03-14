@@ -1,9 +1,15 @@
+import logging
 import os
+import threading
+import urllib.error
 import urllib.request
 from google.cloud import secretmanager
 
+logger = logging.getLogger(__name__)
+
 _cached_project_id = None
 _cached_client = None
+_cache_lock = threading.Lock()
 
 def _get_project_id() -> str:
     """
@@ -31,8 +37,8 @@ def _get_project_id() -> str:
             if resp.status == 200:
                 _cached_project_id = resp.read().decode("utf-8")
                 return _cached_project_id
-    except Exception:
-        pass
+    except (OSError, urllib.error.URLError):
+        logger.debug("GCP metadata server not reachable (expected if not on GCP VM)")
 
     raise ValueError(
         "GCP Project ID could not be determined. "
@@ -47,8 +53,9 @@ def get_secret(secret_id: str) -> str:
     """
     global _cached_client
     project_id = _get_project_id()
-    if _cached_client is None:
-        _cached_client = secretmanager.SecretManagerServiceClient()
+    with _cache_lock:
+        if _cached_client is None:
+            _cached_client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
 
     response = _cached_client.access_secret_version(request={"name": name})
