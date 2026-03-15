@@ -40,15 +40,25 @@ class ChatCog(commands.Cog):
         self.history[context_key] = []
         return self.history[context_key]
 
-    def _find_character(self, name: str):
-        """別名マッピングからキャラクターを検索"""
+    def _find_character(self, name: str, prefix_only: bool = False):
+        """別名マッピングからキャラクターを検索
+
+        prefix_only=True の場合、メッセージ先頭にキャラ名がある場合のみマッチ
+        （メッセージ中の誤判定を防ぐ）
+        """
         # 完全一致
         if name in CHARACTER_ALIASES:
             return CHARACTER_ALIASES[name]
-        # 部分一致（メッセージ内にキャラ名が含まれるケース）
-        for alias, char_data in CHARACTER_ALIASES.items():
-            if alias in name:
-                return char_data
+        if prefix_only:
+            # メッセージ先頭のキャラ名指定のみマッチ（例: "タケシ 今日のニュースは？"）
+            for alias, char_data in CHARACTER_ALIASES.items():
+                if name.startswith(alias):
+                    return char_data
+        else:
+            # 部分一致（スレッド名など短いテキスト向け）
+            for alias, char_data in CHARACTER_ALIASES.items():
+                if alias in name:
+                    return char_data
         return None
 
     async def _find_character_from_thread(self, thread: discord.Thread) -> dict | None:
@@ -69,22 +79,23 @@ class ChatCog(commands.Cog):
     async def _get_target_character(self, message_content: str, thread_name: str = "", thread: discord.Thread = None):
         """メッセージ内容またはスレッド名からキャラクターを特定する"""
 
-        # 1. メッセージ内での明示的なメンション/名前指定からの推測
-        if message_content:
-            char = self._find_character(message_content)
-            if char:
-                return char
-
-        # 2. スレッド内のWebhookメッセージからキャラクターを特定
+        # 1. スレッド内ではWebhook履歴からキャラクターを最優先で特定
         #    （キャラのWebhook発言が存在するスレッドでは、そのキャラが応答すべき）
         if thread is not None:
             char = await self._find_character_from_thread(thread)
             if char:
                 return char
 
-        # 3. スレッド名からの推測 (定時配信で作られたスレッドを想定)
+        # 2. スレッド名からの推測 (定時配信で作られたスレッドを想定)
         if thread_name:
             char = self._find_character(thread_name)
+            if char:
+                return char
+
+        # 3. メッセージ先頭でのキャラ名指定からの推測（チャンネル直書き用）
+        #    先頭一致のみにして、本文中の偶然の一致を防ぐ
+        if message_content:
+            char = self._find_character(message_content, prefix_only=True)
             if char:
                 return char
 
@@ -113,11 +124,11 @@ class ChatCog(commands.Cog):
         target_channel_id = self.bot.channel_id
         is_in_target_channel = message.channel.id == target_channel_id if not is_in_thread else message.channel.parent_id == target_channel_id
 
-        # 当該チャンネルか、Bot作成スレッド内、またはメンションされたら反応
-        should_reply = is_mentioned or (
+        # 対象チャンネル（直書き含む）、スレッド内、またはメンションされたら反応
+        should_reply = is_mentioned or is_in_target_channel or (
             is_in_thread and
             message.channel.owner_id == self.bot.user.id
-        ) or is_in_target_channel
+        )
 
         if not should_reply:
             return
@@ -146,22 +157,22 @@ class ChatCog(commands.Cog):
         target_char = await self._get_target_character(content_clean, thread_name, thread=thread_obj)
 
         # 会話コンテキストの管理キー
-        context_key = message.channel.id
+        # スレッド内: スレッドID（同一スレッド内で会話を共有）
+        # チャンネル直書き（メンション）: チャンネルID + ユーザーID（ユーザーごとに分離）
+        context_key = message.channel.id if is_in_thread else (message.channel.id, message.author.id)
         history = self._get_history(context_key)
 
         async with message.channel.typing():
             try:
-                # ユーザーメッセージを履歴に追加
-                history.append({"role": "user", "content": content_clean})
-
                 # Geminiから返答を取得
                 response_text = await self.gemini.generate_chat_response(
                     personality=target_char["personality"],
-                    chat_history=history[:-1],  # 最新のユーザーメッセージは除いて渡す
+                    chat_history=history,
                     user_message=content_clean
                 )
 
-                # モデルの応答を履歴に追加
+                # 成功時のみ履歴に追加（API失敗時の履歴汚染を防ぐ）
+                history.append({"role": "user", "content": content_clean})
                 history.append({"role": "model", "content": response_text})
 
                 # 履歴が長すぎる場合は古いものを削除
@@ -233,8 +244,8 @@ class ChatCog(commands.Cog):
         embed.add_field(
             name="話しかけ方",
             value=(
-                "- ニュース配信チャンネル内で自由に発言 → AIが最適なキャラを自動選択\n"
-                "- ニュース配信のスレッド内で返信 → そのスレッドのキャラが応答\n"
+                "- チャンネル内で自由に発言 → AIが最適なキャラを自動選択\n"
+                "- スレッド内で返信 → そのスレッドのキャラが応答\n"
                 "- Botをメンションして話しかける"
             ),
             inline=False
