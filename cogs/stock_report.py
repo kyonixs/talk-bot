@@ -5,7 +5,7 @@ import asyncio
 import traceback
 import aiohttp
 from datetime import datetime, timedelta
-from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, TZ_JST
+from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, TZ_JST, TZ_NY
 from services.sheets_service import get_stocks_from_sheet
 from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices
 from services.gemini_service import GeminiService
@@ -70,17 +70,18 @@ class StockReportCog(commands.Cog):
         is_weekday = now.weekday() < 5  # 0-4 (Mon-Fri)
         is_saturday = now.weekday() == 5 # 5 (Sat)
 
-        # 1. 米国株 日次 (平日, 祝日除外, サマータイム対応)
+        # 1. 米国株 日次 (NY時間の平日・祝日で判定, サマータイム対応)
         schedules = STOCK_CONFIG["schedules"]
         us_daily = schedules["us_daily"]
-        if is_weekday and us_daily.get("weekdays_only"):
-            # 今日の祝日チェック
-            if us_daily.get("skip_holidays") and is_holiday(now.date(), us_daily["skip_holidays"]):
-                pass # 祝日はスキップ（毎分ログが出ないようここではpassだけ）
-            else:
+        if us_daily.get("weekdays_only"):
+            # NY時間での曜日・祝日を基準に判定（JSTの早朝はNY前日の閉場後）
+            ny_now = now.astimezone(TZ_NY)
+            is_ny_weekday = ny_now.weekday() < 5
+            is_ny_holiday = us_daily.get("skip_holidays") and is_holiday(ny_now.date(), us_daily["skip_holidays"])
+
+            if is_ny_weekday and not is_ny_holiday:
                 target_time = get_us_market_close_jst(now)
                 offset = STOCK_CONFIG.get("market_close_offset_minutes", 30)
-                # target_timeにoffset(分)を足す
                 target_dt = datetime.combine(now.date(), target_time, tzinfo=TZ_JST)
                 target_dt += timedelta(minutes=offset)
 
@@ -137,6 +138,37 @@ class StockReportCog(commands.Cog):
     async def run_jp_weekly_report(self):
         await self._run_report_workflow("日本株 週次", "JP", True)
 
+    # =========================================================================
+    # Manual Trigger Commands (Owner Only)
+    # =========================================================================
+
+    @commands.command(name="report")
+    @commands.is_owner()
+    async def manual_report(self, ctx, market: str = None, report_type: str = "daily"):
+        """手動でレポートを実行する（Botオーナー限定）
+        使い方: !report us / !report jp / !report us weekly / !report jp weekly
+        """
+        if not market or market.lower() not in ("us", "jp"):
+            await ctx.reply("使い方: `!report us` / `!report jp` / `!report us weekly` / `!report jp weekly`")
+            return
+
+        market_upper = market.upper()
+        weekly = report_type.lower() == "weekly"
+        report_name = f"{('米国株' if market_upper == 'US' else '日本株')} {'週次' if weekly else '日次'}（手動）"
+
+        await ctx.reply(f"📊 {report_name}レポートを開始します...")
+        self._create_report_task(
+            self._run_report_workflow(report_name, market_upper, weekly),
+            f"manual_{market.lower()}_{'weekly' if weekly else 'daily'}_report",
+        )
+
+    @manual_report.error
+    async def manual_report_error(self, ctx, error):
+        if isinstance(error, commands.NotOwner):
+            await ctx.reply("⚠️ このコマンドはBotオーナーのみ使用できます。")
+        else:
+            await ctx.reply(f"⚠️ エラー: {error}")
+
     async def _run_report_workflow(self, report_name: str, market: str, weekly: bool):
         """全体のワークフロー: データ取得 -> レポート生成 -> Discord送信"""
         if self._report_lock.locked():
@@ -151,8 +183,8 @@ class StockReportCog(commands.Cog):
         start_time = asyncio.get_running_loop().time()
         try:
             # 1. Sheetsから銘柄リスト取得
-            holdings_list = await get_stocks_from_sheet("保有銘柄", self.spreadsheet_id)
-            watchlist_list = await get_stocks_from_sheet("監視銘柄", self.spreadsheet_id)
+            holdings_list = await get_stocks_from_sheet(f"{market}_Holdings", self.spreadsheet_id)
+            watchlist_list = await get_stocks_from_sheet(f"{market}_Watchlist", self.spreadsheet_id)
 
             if not holdings_list and not watchlist_list:
                 logger.warning(f"{report_name}: スプレッドシートに銘柄データがありません。レポートを中止します。")
