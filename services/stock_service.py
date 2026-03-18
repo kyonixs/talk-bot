@@ -7,6 +7,9 @@ logger = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
+# 日本株の企業名キャッシュ（プロセス存続中は再スクレイピングしない）
+_jp_name_cache: dict[str, str] = {}
+
 async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) -> dict:
     """Yahoo Finance API (v8) からチャートデータを取得する"""
     hosts = [
@@ -141,7 +144,10 @@ async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.Cl
 
 
 async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None) -> str:
-    """Yahoo Finance JP から日本株の企業名をスクレイピングする"""
+    """Yahoo Finance JP から日本株の企業名をスクレイピングする（キャッシュ付き）"""
+    if code in _jp_name_cache:
+        return _jp_name_cache[code]
+
     owns_session = session is None
     if owns_session:
         session = aiohttp.ClientSession()
@@ -165,7 +171,9 @@ async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None
             for sep in ["【", "(", " - "]:
                 idx = title.find(sep)
                 if idx > 0:
-                    return title[:idx].strip()
+                    name = title[:idx].strip()
+                    _jp_name_cache[code] = name
+                    return name
 
             return ""
     except Exception as e:

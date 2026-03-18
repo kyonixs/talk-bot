@@ -1,3 +1,4 @@
+import asyncio
 import time
 import logging
 import discord
@@ -20,8 +21,8 @@ class ChatCog(commands.Cog):
         self.gemini = GeminiService(bot.gemini_api_key)
 
         # 会話履歴を保持するインメモリ辞書（LRU方式で古いエントリを自動削除）
-        # キー: thread_id または channel_id
-        # 値: [{"role": "user"|"model", "content": str}, ...]
+        # キー: thread_id または (channel_id, user_id)
+        # 値: {"char_name": str, "messages": [{"role": "user"|"model", "content": str}, ...]}
         self.history = OrderedDict()
         self.MAX_HISTORY = 5
         self.MAX_CONTEXTS = 100  # 最大保持コンテキスト数
@@ -29,16 +30,54 @@ class ChatCog(commands.Cog):
         # クールダウン管理: {user_id: last_response_timestamp}
         self._user_cooldowns: dict[int, float] = {}
 
-    def _get_history(self, context_key: int) -> list:
-        """会話履歴を取得（LRU方式で管理）"""
+        # [B] コンテキストキー単位のロック（同一会話で並行リクエストを防止）
+        self._context_locks: dict = {}
+
+        # [D] スレッドID → キャラクター名のキャッシュ（毎回Discord APIを叩かない）
+        self._thread_char_cache: dict[int, dict] = {}
+
+    # =========================================================================
+    # Concurrency Control
+    # =========================================================================
+
+    def _get_context_lock(self, context_key) -> asyncio.Lock:
+        """コンテキストキー単位のロックを取得（なければ作成）"""
+        if context_key not in self._context_locks:
+            self._context_locks[context_key] = asyncio.Lock()
+            # ロック辞書が肥大化しないよう上限管理
+            if len(self._context_locks) > 200:
+                unlocked = [k for k, v in self._context_locks.items() if not v.locked()]
+                for k in unlocked[:50]:
+                    del self._context_locks[k]
+        return self._context_locks[context_key]
+
+    # =========================================================================
+    # History Management
+    # =========================================================================
+
+    def _get_history(self, context_key, char_name: str) -> list:
+        """会話履歴を取得（LRU方式で管理）
+        [A] キャラが変わった場合は履歴をリセットする
+        """
         if context_key in self.history:
             self.history.move_to_end(context_key)
-            return self.history[context_key]
-        # 上限を超えたら最も古いエントリを削除
+            entry = self.history[context_key]
+            # キャラが変わった場合は履歴をリセット
+            if entry["char_name"] != char_name:
+                logger.info(f"[履歴] キャラ変更検知: {entry['char_name']} → {char_name}（履歴リセット）")
+                entry["char_name"] = char_name
+                entry["messages"] = []
+            return entry["messages"]
+
+        # 新規エントリ作成（上限を超えたら最も古いエントリを削除）
         if len(self.history) >= self.MAX_CONTEXTS:
             self.history.popitem(last=False)
-        self.history[context_key] = []
-        return self.history[context_key]
+        self.history[context_key] = {"char_name": char_name, "messages": []}
+        return self.history[context_key]["messages"]
+
+    # =========================================================================
+    # Character Detection
+    # =========================================================================
 
     def _find_character(self, name: str, prefix_only: bool = False):
         """別名マッピングからキャラクターを検索
@@ -62,44 +101,78 @@ class ChatCog(commands.Cog):
         return None
 
     async def _find_character_from_thread(self, thread: discord.Thread) -> dict | None:
-        """スレッド内の直近Webhookメッセージからキャラクターを特定する"""
+        """スレッド内の直近Webhookメッセージからキャラクターを特定する
+        [D] キャッシュ済みならAPI呼び出しをスキップ
+        """
+        # キャッシュチェック
+        cached = self._thread_char_cache.get(thread.id)
+        if cached is not None:
+            return cached
+
         try:
-            # スレッド内の直近メッセージを取得して、Webhook送信メッセージを探す
             async for msg in thread.history(limit=20):
                 if msg.webhook_id:
-                    # Webhookメッセージの author.display_name はキャラクター名
                     char = self._find_character(msg.author.display_name)
                     if char:
                         logger.debug(f"[スレッドキャラ特定] {char['name']} をWebhook履歴から検出")
+                        self._thread_char_cache[thread.id] = char
+                        # キャッシュが肥大化しないよう上限管理
+                        if len(self._thread_char_cache) > 200:
+                            oldest = next(iter(self._thread_char_cache))
+                            del self._thread_char_cache[oldest]
                         return char
         except Exception as e:
             logger.warning(f"[スレッドキャラ特定] 履歴取得エラー: {e}")
         return None
 
-    async def _get_target_character(self, message_content: str, thread_name: str = "", thread: discord.Thread = None):
-        """メッセージ内容またはスレッド名からキャラクターを特定する"""
+    async def _get_referenced_message(self, message: discord.Message) -> discord.Message | None:
+        """返信先メッセージを取得する（キャッシュ済みならそれを使用）"""
+        if not message.reference or not message.reference.message_id:
+            return None
+        try:
+            ref_msg = message.reference.resolved
+            if ref_msg is None:
+                ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            return ref_msg
+        except Exception as e:
+            logger.warning(f"[返信先取得] エラー: {e}")
+            return None
 
-        # 1. スレッド内ではWebhook履歴からキャラクターを最優先で特定
+    async def _get_target_character(self, message_content: str, thread_name: str = "",
+                                    thread: discord.Thread = None,
+                                    ref_msg: discord.Message | None = None):
+        """メッセージ内容またはスレッド名からキャラクターを特定する
+        [B] ref_msg は呼び出し元で1回だけ取得して渡す
+        """
+        # 1. 返信先のWebhookメッセージからキャラクターを最優先で特定
+        #    （ランダム雑談等のWebhook発言に返信した場合、そのキャラが応答すべき）
+        if ref_msg is not None and ref_msg.webhook_id:
+            char = self._find_character(ref_msg.author.display_name)
+            if char:
+                logger.debug(f"[返信先キャラ特定] {char['name']} を返信先Webhookから検出")
+                return char
+
+        # 2. スレッド内ではWebhook履歴からキャラクターを特定
         #    （キャラのWebhook発言が存在するスレッドでは、そのキャラが応答すべき）
         if thread is not None:
             char = await self._find_character_from_thread(thread)
             if char:
                 return char
 
-        # 2. スレッド名からの推測 (定時配信で作られたスレッドを想定)
+        # 3. スレッド名からの推測 (定時配信で作られたスレッドを想定)
         if thread_name:
             char = self._find_character(thread_name)
             if char:
                 return char
 
-        # 3. メッセージ先頭でのキャラ名指定からの推測（チャンネル直書き用）
+        # 4. メッセージ先頭でのキャラ名指定からの推測（チャンネル直書き用）
         #    先頭一致のみにして、本文中の偶然の一致を防ぐ
         if message_content:
             char = self._find_character(message_content, prefix_only=True)
             if char:
                 return char
 
-        # 4. 指定がない場合はAIルーターによる自動振り分け
+        # 5. 指定がない場合はAIルーターによる自動振り分け
         routed_name = await self.gemini.determine_character(message_content)
         char = self._find_character(routed_name)
         if char:
@@ -107,6 +180,10 @@ class ChatCog(commands.Cog):
 
         # フォールバック
         return CHARACTERS["タケシ"]
+
+    # =========================================================================
+    # Message Handler
+    # =========================================================================
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -120,7 +197,7 @@ class ChatCog(commands.Cog):
 
         is_in_thread = isinstance(message.channel, discord.Thread)
         is_mentioned = self.bot.user in message.mentions
-        
+
         target_channel_id = self.bot.channel_id
         is_in_target_channel = message.channel.id == target_channel_id if not is_in_thread else message.channel.parent_id == target_channel_id
 
@@ -152,42 +229,64 @@ class ChatCog(commands.Cog):
         if not content_clean:
             return
 
-        # キャラクターの特定（スレッド内ではWebhook履歴から、それ以外はAI Router経由）
+        # [B] 返信先メッセージを1回だけ取得（キャラ特定 + コンテキスト注入で共有）
+        ref_msg = await self._get_referenced_message(message)
+
+        # キャラクターの特定（返信先Webhook → スレッド履歴 → AI Router の優先順）
         thread_obj = message.channel if is_in_thread else None
-        target_char = await self._get_target_character(content_clean, thread_name, thread=thread_obj)
+        target_char = await self._get_target_character(
+            content_clean, thread_name, thread=thread_obj, ref_msg=ref_msg
+        )
 
         # 会話コンテキストの管理キー
         # スレッド内: スレッドID（同一スレッド内で会話を共有）
         # チャンネル直書き（メンション）: チャンネルID + ユーザーID（ユーザーごとに分離）
         context_key = message.channel.id if is_in_thread else (message.channel.id, message.author.id)
-        history = self._get_history(context_key)
 
-        async with message.channel.typing():
-            try:
-                # Geminiから返答を取得
-                response_text = await self.gemini.generate_chat_response(
-                    personality=target_char["personality"],
-                    chat_history=history,
-                    user_message=content_clean
-                )
+        # [B] 同一コンテキスト内のリクエストを直列化（応答順序の保証）
+        lock = self._get_context_lock(context_key)
+        async with lock:
+            # [A] キャラ名付きで履歴を取得（キャラが変わったら自動リセット）
+            history = self._get_history(context_key, target_char["name"])
 
-                # 成功時のみ履歴に追加（API失敗時の履歴汚染を防ぐ）
-                history.append({"role": "user", "content": content_clean})
-                history.append({"role": "model", "content": response_text})
+            # [C] 返信先メッセージの内容を文脈として注入
+            # キャラ変更でリセット済み or 新規の場合、返信先の発言を直前の文脈として追加
+            if ref_msg and ref_msg.content and not history:
+                history.append({"role": "model", "content": ref_msg.content})
 
-                # 履歴が長すぎる場合は古いものを削除
-                if len(history) > self.MAX_HISTORY * 2:
-                    del history[:len(history) - self.MAX_HISTORY * 2]
+            async with message.channel.typing():
+                try:
+                    # Geminiから返答を取得
+                    response_text = await self.gemini.generate_chat_response(
+                        personality=target_char["personality"],
+                        chat_history=history,
+                        user_message=content_clean
+                    )
 
-                # Webhookでなりすまし送信
-                result = await send_as_character(message.channel, target_char, response_text)
-                if result is None:
-                    logger.warning("send_as_character returned None, using fallback reply.")
-                    await message.reply(response_text[:2000])
+                    # 成功時のみ履歴に追加（API失敗時の履歴汚染を防ぐ）
+                    history.append({"role": "user", "content": content_clean})
+                    history.append({"role": "model", "content": response_text})
 
-            except Exception as e:
-                logger.error(f"Chat Cog Error: {e}")
-                await message.reply("ごめん、今ちょっと返事ができないみたい…")
+                    # 履歴が長すぎる場合は古いものを削除
+                    if len(history) > self.MAX_HISTORY * 2:
+                        del history[:len(history) - self.MAX_HISTORY * 2]
+
+                    # Webhookでなりすまし送信
+                    result = await send_as_character(message.channel, target_char, response_text)
+                    if result is None:
+                        logger.warning("send_as_character returned None, using fallback reply.")
+                        await message.reply(response_text[:2000])
+
+                except asyncio.TimeoutError:
+                    logger.warning(f"Chat Cog Timeout: Gemini API did not respond in time")
+                    await message.reply("ちょっと考え込んじゃった…もう一回聞いて！")
+                except Exception as e:
+                    logger.error(f"Chat Cog Error: {e}")
+                    await message.reply("ごめん、今ちょっと返事ができないみたい…")
+
+    # =========================================================================
+    # Commands
+    # =========================================================================
 
     @commands.command(name="ask")
     async def ask_command(self, ctx, char_name: str, *, question: str):
@@ -247,17 +346,6 @@ class ChatCog(commands.Cog):
                 "- チャンネル内で自由に発言 → AIが最適なキャラを自動選択\n"
                 "- スレッド内で返信 → そのスレッドのキャラが応答\n"
                 "- Botをメンションして話しかける"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="📊 株式レポート（自動配信）",
-            value=(
-                "- 米国株 日次: 平日 市場閉場後（夏05:30 / 冬06:30 JST）\n"
-                "- 日本株 日次: 平日 15:30 JST\n"
-                "- 週次レポート: 毎週土曜（米国15:00 / 日本14:00 JST）\n"
-                "- 主要指数 + AI分析がスレッドで届きます"
             ),
             inline=False
         )

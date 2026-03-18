@@ -151,59 +151,56 @@ class GeminiService:
         """
         スレッドやメンションでの会話用。
         chat_history: [{"role": "user" or "model", "content": "..."}] のリスト形式
+        エラー時は例外をraiseする（呼び出し元で処理すること）。
         """
-        try:
-            # historyの構築
-            contents = []
-            for msg in chat_history:
-                role = "user" if msg["role"] == "user" else "model"
-                contents.append(
-                    types.Content(
-                        role=role,
-                        parts=[types.Part.from_text(text=msg["content"])]
-                    )
-                )
-
-            # 最新のユーザーメッセージを追加
+        # historyの構築
+        contents = []
+        for msg in chat_history:
+            role = "user" if msg["role"] == "user" else "model"
             contents.append(
                 types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=user_message)]
+                    role=role,
+                    parts=[types.Part.from_text(text=msg["content"])]
                 )
             )
 
-            response = await asyncio.wait_for(
-                self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=(
-                            personality + "\n\n"
-                            "【重要なルール】\n"
-                            "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
-                            "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
-                            "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
-                        ),
-                        tools=[{"google_search": {}}],
-                        temperature=0.7
-                    )
-                ),
-                timeout=_GEMINI_TIMEOUT_CHAT,
+        # 最新のユーザーメッセージを追加
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=user_message)]
             )
+        )
 
-            # Google Search Grounding使用時の重複防止: 最初のテキストpartだけを取得
-            if response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if part.text:
-                        return part.text.strip()
+        response = await asyncio.wait_for(
+            self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        personality + "\n\n"
+                        "【重要なルール】\n"
+                        "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
+                        "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
+                        "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
+                    ),
+                    tools=[{"google_search": {}}],
+                    temperature=0.7
+                )
+            ),
+            timeout=_GEMINI_TIMEOUT_CHAT,
+        )
 
-            try:
-                return response.text
-            except (ValueError, AttributeError):
-                return "ごめんね、今ちょっと頭回ってないかも。もう一回言ってくれる？"
-        except Exception as e:
-            logger.error(f"Error calling Gemini API for chat: {e}")
-            return "ごめんね、今ちょっと頭回ってないかも。もう一回言ってくれる？"
+        # Google Search Grounding使用時の重複防止: 最初のテキストpartだけを取得
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if part.text:
+                    return part.text.strip()
+
+        try:
+            return response.text
+        except (ValueError, AttributeError):
+            raise RuntimeError("Gemini returned no valid text for chat response")
 
     async def determine_character(self, user_message: str) -> str:
         """

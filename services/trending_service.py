@@ -34,14 +34,13 @@ _KEYWORD_TO_CATEGORY = {
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
-async def _fetch_rss(url: str, retries: int = 2) -> str | None:
+async def _fetch_rss(url: str, session: aiohttp.ClientSession, retries: int = 2) -> str | None:
     for attempt in range(retries + 1):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=_TIMEOUT) as resp:
-                    if resp.status == 200:
-                        return await resp.text()
-                    logger.warning(f"RSS fetch failed ({resp.status}): {url}")
+            async with session.get(url, timeout=_TIMEOUT) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+                logger.warning(f"RSS fetch failed ({resp.status}): {url}")
         except Exception as e:
             logger.warning(f"RSS fetch error (attempt {attempt + 1}/{retries + 1}): {url} - {e}")
         if attempt < retries:
@@ -49,8 +48,8 @@ async def _fetch_rss(url: str, retries: int = 2) -> str | None:
     return None
 
 
-async def _fetch_google_trends(limit: int = 10) -> list[str]:
-    text = await _fetch_rss(GOOGLE_TRENDS_RSS)
+async def _fetch_google_trends(session: aiohttp.ClientSession, limit: int = 10) -> list[str]:
+    text = await _fetch_rss(GOOGLE_TRENDS_RSS, session)
     if not text:
         return []
     try:
@@ -64,9 +63,9 @@ async def _fetch_google_trends(limit: int = 10) -> list[str]:
         return []
 
 
-async def _fetch_hatena_hotentry(category: str = "general", limit: int = 10) -> list[str]:
+async def _fetch_hatena_hotentry(session: aiohttp.ClientSession, category: str = "general", limit: int = 10) -> list[str]:
     url = HATENA_CATEGORIES.get(category, HATENA_CATEGORIES["general"])
-    text = await _fetch_rss(url)
+    text = await _fetch_rss(url, session)
     if not text:
         return []
     try:
@@ -97,10 +96,11 @@ async def fetch_trending_context(description: str) -> str:
     """
     hatena_cat = _detect_hatena_category(description)
 
-    trends, hotentry = await asyncio.gather(
-        _fetch_google_trends(limit=10),
-        _fetch_hatena_hotentry(category=hatena_cat, limit=10),
-    )
+    async with aiohttp.ClientSession() as session:
+        trends, hotentry = await asyncio.gather(
+            _fetch_google_trends(session, limit=10),
+            _fetch_hatena_hotentry(session, category=hatena_cat, limit=10),
+        )
 
     lines: list[str] = []
     if trends:

@@ -91,6 +91,7 @@ class RandomChatCog(commands.Cog):
                 logger.warning(f"[ランダム雑談] トレンドデータ取得失敗（続行します）: {e}")
 
             # キャラの担当ジャンルで最新の話題を検索して雑談メッセージを生成
+            # 失敗時は1回リトライ、それでもダメなら別キャラで再試行
             response = await self.gemini.generate_random_chat(
                 personality=char_data["personality"],
                 topics=char_data["description"],
@@ -98,7 +99,28 @@ class RandomChatCog(commands.Cog):
             )
 
             if not response:
-                logger.info(f"[ランダム雑談] {char_data['name']} の雑談生成に失敗。スキップ。")
+                logger.info(f"[ランダム雑談] {char_data['name']} の生成失敗。リトライします...")
+                await asyncio.sleep(3)
+                response = await self.gemini.generate_random_chat(
+                    personality=char_data["personality"],
+                    topics=char_data["description"],
+                    trending_context=trending_context,
+                )
+
+            # 2回失敗したら別キャラで再試行
+            if not response:
+                other_chars = [c for c in available_chars if c["name"] != char_data["name"]]
+                if other_chars:
+                    char_data = random.choice(other_chars)
+                    logger.info(f"[ランダム雑談] 別キャラ {char_data['name']} で再試行...")
+                    response = await self.gemini.generate_random_chat(
+                        personality=char_data["personality"],
+                        topics=char_data["description"],
+                        trending_context=trending_context,
+                    )
+
+            if not response:
+                logger.warning("[ランダム雑談] 全リトライ失敗。スキップ。")
                 return
 
             await send_as_character(channel, char_data, response, wait=True)
