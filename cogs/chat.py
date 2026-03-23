@@ -31,10 +31,11 @@ class ChatCog(commands.Cog):
         self._user_cooldowns: dict[int, float] = {}
 
         # [B] コンテキストキー単位のロック（同一会話で並行リクエストを防止）
-        self._context_locks: dict = {}
+        self._context_locks: dict[int | tuple, asyncio.Lock] = {}
 
-        # [D] スレッドID → キャラクター名のキャッシュ（毎回Discord APIを叩かない）
-        self._thread_char_cache: dict[int, dict] = {}
+        # [D] スレッドID → キャラクター名のキャッシュ（LRU方式、毎回Discord APIを叩かない）
+        self._thread_char_cache: OrderedDict[int, dict] = OrderedDict()
+        self._MAX_THREAD_CACHE = 200
 
     # =========================================================================
     # Concurrency Control
@@ -71,7 +72,9 @@ class ChatCog(commands.Cog):
 
         # 新規エントリ作成（上限を超えたら最も古いエントリを削除）
         if len(self.history) >= self.MAX_CONTEXTS:
-            self.history.popitem(last=False)
+            evicted_key, _ = self.history.popitem(last=False)
+            logger.debug(f"[履歴] LRU削除: context_key={evicted_key}")
+
         self.history[context_key] = {"char_name": char_name, "messages": []}
         return self.history[context_key]["messages"]
 
@@ -116,10 +119,10 @@ class ChatCog(commands.Cog):
                     if char:
                         logger.debug(f"[スレッドキャラ特定] {char['name']} をWebhook履歴から検出")
                         self._thread_char_cache[thread.id] = char
-                        # キャッシュが肥大化しないよう上限管理
-                        if len(self._thread_char_cache) > 200:
-                            oldest = next(iter(self._thread_char_cache))
-                            del self._thread_char_cache[oldest]
+                        self._thread_char_cache.move_to_end(thread.id)
+                        # LRU方式: 上限を超えたら最も古いエントリを削除
+                        while len(self._thread_char_cache) > self._MAX_THREAD_CACHE:
+                            self._thread_char_cache.popitem(last=False)
                         return char
         except Exception as e:
             logger.warning(f"[スレッドキャラ特定] 履歴取得エラー: {e}")
@@ -137,6 +140,26 @@ class ChatCog(commands.Cog):
         except Exception as e:
             logger.warning(f"[返信先取得] エラー: {e}")
             return None
+
+    async def _build_reply_chain(self, message: discord.Message, limit: int = 5) -> list[dict]:
+        """返信チェーンを遡って会話履歴を構築する。
+        Discord の返信チェーン（A→B→C→...）を辿り、
+        Webhook(キャラ)=model / ユーザー=user として時系列順の履歴を返す。
+        """
+        chain = []
+        current = message
+
+        for _ in range(limit):
+            ref = await self._get_referenced_message(current)
+            if not ref or not ref.content:
+                break
+            role = "model" if ref.webhook_id else "user"
+            chain.append({"role": role, "content": ref.content})
+            current = ref
+
+        chain.reverse()  # 古い順にする
+        logger.debug(f"[返信チェーン] 深さ={len(chain)} (limit={limit})")
+        return chain
 
     async def _get_target_character(self, message_content: str, thread_name: str = "",
                                     thread: discord.Thread = None,
@@ -179,6 +202,7 @@ class ChatCog(commands.Cog):
             return char
 
         # フォールバック
+        logger.info("[キャラ特定] 全手段で特定できず → デフォルト(タケシ)")
         return CHARACTERS["タケシ"]
 
     # =========================================================================
@@ -246,30 +270,31 @@ class ChatCog(commands.Cog):
         # [B] 同一コンテキスト内のリクエストを直列化（応答順序の保証）
         lock = self._get_context_lock(context_key)
         async with lock:
-            # [A] キャラ名付きで履歴を取得（キャラが変わったら自動リセット）
-            history = self._get_history(context_key, target_char["name"])
-
-            # [C] 返信先メッセージの内容を文脈として注入
-            # キャラ変更でリセット済み or 新規の場合、返信先の発言を直前の文脈として追加
-            if ref_msg and ref_msg.content and not history:
-                history.append({"role": "model", "content": ref_msg.content})
+            # 返信チェーンがある場合: チェーンから会話履歴を構築（正確な文脈）
+            # 返信なしの場合: 蓄積履歴を使用（従来通り）
+            logger.debug(f"[会話] char={target_char['name']}, ref={'あり' if ref_msg else 'なし'}, ctx={context_key}")
+            if ref_msg:
+                chat_history = await self._build_reply_chain(message)
+            else:
+                chat_history = self._get_history(context_key, target_char["name"])
 
             async with message.channel.typing():
                 try:
                     # Geminiから返答を取得
                     response_text = await self.gemini.generate_chat_response(
                         personality=target_char["personality"],
-                        chat_history=history,
+                        chat_history=chat_history,
                         user_message=content_clean
                     )
 
-                    # 成功時のみ履歴に追加（API失敗時の履歴汚染を防ぐ）
-                    history.append({"role": "user", "content": content_clean})
-                    history.append({"role": "model", "content": response_text})
+                    # 蓄積履歴にも追加（返信なしの後続メッセージ用）
+                    stored_history = self._get_history(context_key, target_char["name"])
+                    stored_history.append({"role": "user", "content": content_clean})
+                    stored_history.append({"role": "model", "content": response_text})
 
                     # 履歴が長すぎる場合は古いものを削除
-                    if len(history) > self.MAX_HISTORY * 2:
-                        del history[:len(history) - self.MAX_HISTORY * 2]
+                    if len(stored_history) > self.MAX_HISTORY * 2:
+                        del stored_history[:len(stored_history) - self.MAX_HISTORY * 2]
 
                     # Webhookでなりすまし送信
                     result = await send_as_character(message.channel, target_char, response_text)

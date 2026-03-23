@@ -18,7 +18,7 @@ class StockReportCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Botの初期化時に取得済みの株式用APIキー・Webhook URLを使用
-        self.gemini_service = GeminiService(api_key=bot.gemini_api_key_stock)
+        self.gemini = GeminiService(api_key=bot.gemini_api_key_stock)
         self.webhook_url = bot.discord_webhook_stock
         self.spreadsheet_id = bot.spreadsheet_id
 
@@ -172,7 +172,7 @@ class StockReportCog(commands.Cog):
     async def _run_report_workflow(self, report_name: str, market: str, weekly: bool):
         """全体のワークフロー: データ取得 -> レポート生成 -> Discord送信"""
         if self._report_lock.locked():
-            logger.warning(f"[{report_name}] 別のレポートが実行中のためスキップ")
+            logger.warning(f"[{report_name}] 別のレポートが実行中のためスキップ（ロック保持中）")
             return
 
         async with self._report_lock:
@@ -186,6 +186,7 @@ class StockReportCog(commands.Cog):
             holdings_list = await get_stocks_from_sheet(f"{market}_Holdings", self.spreadsheet_id)
             watchlist_list = await get_stocks_from_sheet(f"{market}_Watchlist", self.spreadsheet_id)
 
+            logger.info(f"[{report_name}] シート読込完了: Holdings={len(holdings_list)}件, Watchlist={len(watchlist_list)}件")
             if not holdings_list and not watchlist_list:
                 logger.warning(f"{report_name}: スプレッドシートに銘柄データがありません。レポートを中止します。")
                 return
@@ -207,6 +208,7 @@ class StockReportCog(commands.Cog):
                         raise result
 
                 holdings_map, watchlist_map, indices = results
+                logger.info(f"[{report_name}] 株価取得完了: Holdings={len(holdings_map)}件, Watchlist={len(watchlist_map)}件, 指数={len(indices)}件")
 
             # 3. プロンプト生成（指数データ付き、戻り値は {"system_instruction": s, "user_prompt": u} の dict）
             if market == "US":
@@ -218,7 +220,7 @@ class StockReportCog(commands.Cog):
 
             # 4. Gemini でレポート生成
             logger.info(f"Generating {report_name} using Gemini...")
-            ai_result = await self.gemini_service.generate_stock_report(prompt_data)
+            ai_result = await self.gemini.generate_stock_report(prompt_data)
             result_text = ai_result.get("text", "")
             if ai_result.get("truncated"):
                 result_text += "\n\n*(※文字数制限により途切れています)*"
@@ -447,22 +449,26 @@ class StockReportCog(commands.Cog):
         # スタックトレースはサーバーログにのみ出力
         logger.error(f"{func_name}: {traceback.format_exc()}")
 
-        # Discordにはエラー種別と概要のみ送信（パスやモジュール名を露出しない）
+        # Discordにはエラー種別と概要を送信（パスやモジュール名を露出しない）
         error_type = type(error).__name__
         error_details = ""
-        
+
         # HttpError の場合は詳細情報を抽出
         if error_type == "HttpError" and hasattr(error, 'resp') and hasattr(error, 'content'):
             try:
                 import json
                 status = error.resp.status
                 reason = error.resp.reason
-                # content から具体的なメッセージを抽出を試みる
                 content = json.loads(error.content.decode('utf-8'))
                 message = content.get('error', {}).get('message', str(error))
                 error_details = f"\n**詳細:** {status} {reason}\n**メッセージ:** {message}"
             except Exception:
                 error_details = f"\n**詳細:** {str(error)}"
+        else:
+            # TypeError, ValueError 等すべてのエラーでメッセージを表示
+            error_msg = str(error)
+            if error_msg:
+                error_details = f"\n**メッセージ:** {error_msg}"
 
         text = f"🚨 **Stock Report Error** 🚨\n**処理:** {func_name}\n**種別:** {error_type}{error_details}\n詳細はサーバーログを確認してください。"
 

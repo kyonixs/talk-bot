@@ -25,7 +25,7 @@ async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) 
 
     last_error = None
     try:
-        for host in hosts:
+        for i, host in enumerate(hosts):
             try:
                 async with session.get(host + path, headers=headers, timeout=_REQUEST_TIMEOUT) as response:
                     if response.status != 200:
@@ -146,6 +146,7 @@ async def fetch_us_stock(ticker: str, cached_name: str = "", session: aiohttp.Cl
 async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None) -> str:
     """Yahoo Finance JP から日本株の企業名をスクレイピングする（キャッシュ付き）"""
     if code in _jp_name_cache:
+        logger.debug(f"[JP名前] キャッシュヒット: {code} → {_jp_name_cache[code]}")
         return _jp_name_cache[code]
 
     owns_session = session is None
@@ -158,6 +159,7 @@ async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None
 
         async with session.get(url, headers=headers, timeout=_REQUEST_TIMEOUT) as response:
             if response.status != 200:
+                logger.debug(f"[JP名前] HTTP {response.status}: {code}")
                 return ""
 
             html = await response.text()
@@ -173,6 +175,7 @@ async def fetch_jp_company_name(code: str, session: aiohttp.ClientSession = None
                 if idx > 0:
                     name = title[:idx].strip()
                     _jp_name_cache[code] = name
+                    logger.debug(f"[JP名前] スクレイピング成功: {code} → {name}")
                     return name
 
             return ""

@@ -1,6 +1,6 @@
 import holidays
 from zoneinfo import ZoneInfo
-from datetime import datetime, time
+from datetime import datetime, time, date
 
 # 日本時間(JST)と米国東部標準時(EST/EDT)のタイムゾーン
 TZ_JST = ZoneInfo("Asia/Tokyo")
@@ -73,6 +73,15 @@ def is_holiday(date_obj, market: str) -> bool:
         return date_obj in nyse_holidays
     elif market == "JP":
         jpn_holidays = holidays.JP(years=year)
-        return date_obj in jpn_holidays
+        if date_obj in jpn_holidays:
+            return True
+        # 東証固有の休場日（holidays.JP には含まれない）
+        # 12/31, 1/2, 1/3 は東証の年末年始休場日
+        tse_extra_closures = {
+            date(year, 1, 2),
+            date(year, 1, 3),
+            date(year, 12, 31),
+        }
+        return date_obj in tse_extra_closures
 
     return False

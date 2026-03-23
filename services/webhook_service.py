@@ -11,12 +11,16 @@ async def get_or_create_webhook(channel: discord.TextChannel, webhook_name: str 
     """チャンネルに紐づくWebhookを取得（なければ作成）。キャッシュ済みなら再利用。"""
     cached = _webhook_cache.get(channel.id)
     if cached is not None:
+        logger.debug(f"[Webhook] Cache hit: channel={channel.id}")
         return cached
 
     webhooks = await channel.webhooks()
     webhook = discord.utils.get(webhooks, name=webhook_name)
     if not webhook:
         webhook = await channel.create_webhook(name=webhook_name)
+        logger.info(f"[Webhook] 新規作成: channel={channel.id}")
+    else:
+        logger.debug(f"[Webhook] 既存取得: channel={channel.id}")
 
     _webhook_cache[channel.id] = webhook
     return webhook
@@ -41,6 +45,8 @@ async def send_as_character(
 
         # チャット応答は2000文字で切り詰め（長文のチャンク分割はstock_report側で管理）
         truncated = content[:2000] if len(content) > 2000 else content
+        if len(content) > 2000:
+            logger.debug(f"[Webhook] メッセージ切り詰め: {len(content)} → 2000 chars")
         sent_message = await webhook.send(
             content=truncated,
             username=character["name"],

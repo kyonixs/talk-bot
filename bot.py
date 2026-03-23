@@ -1,11 +1,13 @@
 import logging
+import os
 import discord
 from discord.ext import commands
 from services.secret_service import get_secret
 
-# ログ設定（全モジュール共通）
+# ログ設定（全モジュール共通）— 環境変数 LOG_LEVEL で切替可能（デフォルト: INFO）
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -24,6 +26,7 @@ class NewsBot(commands.Bot):
             intents=intents,
             help_command=None
         )
+        self._heartbeat_task_running = False
 
         # Secret Managerからシークレット・設定値を取得
         logger.info("Fetching secrets from GCP Secret Manager...")
@@ -56,6 +59,28 @@ class NewsBot(commands.Bot):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         # 起動ステータスの設定
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!help"))
+        # ヘルスチェック用ハートビートファイルを更新
+        self._update_heartbeat()
+        # 定期的にハートビートを更新するタスクを開始
+        if not self._heartbeat_task_running:
+            self._heartbeat_task_running = True
+            self.loop.create_task(self._heartbeat_loop())
+
+    def _update_heartbeat(self):
+        """ヘルスチェック用ハートビートファイルを更新する"""
+        try:
+            import pathlib
+            pathlib.Path("/tmp/bot_heartbeat").write_text(str(os.getpid()))
+        except Exception:
+            pass
+
+    async def _heartbeat_loop(self):
+        """定期的にハートビートファイルを更新（Botが接続中のみ）"""
+        import asyncio
+        while True:
+            await asyncio.sleep(30)
+            if self.is_ready() and not self.is_closed():
+                self._update_heartbeat()
 
 if __name__ == "__main__":
     logger.info("Initializing bot...")

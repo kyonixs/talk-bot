@@ -95,6 +95,7 @@ async def fetch_trending_context(description: str) -> str:
     取得失敗時は空文字を返す。
     """
     hatena_cat = _detect_hatena_category(description)
+    logger.debug(f"[Trending] はてなカテゴリ: {hatena_cat} (description: {description[:30]})")
 
     async with aiohttp.ClientSession() as session:
         trends, hotentry = await asyncio.gather(
@@ -102,6 +103,7 @@ async def fetch_trending_context(description: str) -> str:
             _fetch_hatena_hotentry(session, category=hatena_cat, limit=10),
         )
 
+    logger.debug(f"[Trending] 取得結果: Google={len(trends)}件, はてブ={len(hotentry)}件")
     lines: list[str] = []
     if trends:
         lines.append("【今Googleでバズってる検索ワード】")

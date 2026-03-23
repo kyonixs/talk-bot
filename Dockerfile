@@ -12,9 +12,10 @@ COPY . .
 # timezoneを環境変数で上書きできるようにしつつ、デフォルトをJSTに
 ENV TZ=Asia/Tokyo
 
-# ヘルスチェック: PID 1 (bot.py) の生存確認（追加パッケージ不要）
+# ヘルスチェック: ハートビートファイルが直近90秒以内に更新されているか確認
+#  - bot.py が Discord に接続中の場合のみ30秒ごとにファイルを更新する
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
-    CMD python -c "import os; os.kill(1, 0)" || exit 1
+    CMD python -c "import os, time; assert time.time() - os.path.getmtime('/tmp/bot_heartbeat') < 90" || exit 1
 
 # Botの起動
 CMD ["python", "bot.py"]

@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# ドキュメント
+README.md
+*.md
+
+# アセット画像（GitHub raw URL でホストするため Docker 内には不要）
+assets/
+
+# Python キャッシュ
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 開発環境
+.vscode/
+.idea/
+venv/
+.env
+.venv/
+
+# macOS
+.DS_Store

@@ -12,6 +12,38 @@ _GEMINI_TIMEOUT_CHAT = 30    # 雑談・会話
 _GEMINI_TIMEOUT_ROUTER = 10  # ルーター（短い応答のみ）
 
 
+def _extract_text(response) -> str | None:
+    """Geminiレスポンスから非思考テキストを抽出する。
+    Gemini 2.5系は思考過程(thought=True)と最終回答が別partsで返るため、
+    思考パートをスキップして最終回答のみを取得する。
+    """
+    try:
+        candidates = response.candidates
+        if not candidates:
+            return None
+        content = candidates[0].content
+        if not content or not content.parts:
+            return None
+
+        # デバッグ: partsの構成をログに出力（thought属性の有無を確認）
+        parts_info = []
+        for i, part in enumerate(content.parts):
+            has_thought = hasattr(part, "thought")
+            is_thought = getattr(part, "thought", False)
+            text_preview = (part.text[:50] + "...") if part.text and len(part.text) > 50 else (part.text or "(no text)")
+            parts_info.append(f"  part[{i}]: thought_attr={has_thought}, thought={is_thought}, text={text_preview!r}")
+        logger.debug(f"[_extract_text] {len(content.parts)} parts:\n" + "\n".join(parts_info))
+
+        for part in content.parts:
+            if getattr(part, "thought", False):
+                continue
+            if part.text:
+                return part.text.strip()
+    except (AttributeError, IndexError):
+        pass
+    return None
+
+
 class GeminiService:
     def __init__(self, api_key: str):
         # 実行時に渡されたAPIキーを使用して初期化する
@@ -35,6 +67,7 @@ class GeminiService:
 
         for attempt in range(max_retries):
             try:
+                logger.info(f"[Gemini] Stock report generation (attempt {attempt + 1}/{max_retries}, prompt={len(user_prompt)} chars)")
                 response = await asyncio.wait_for(
                     self.client.aio.models.generate_content(
                         model=self.model_name,
@@ -49,18 +82,9 @@ class GeminiService:
                     timeout=_GEMINI_TIMEOUT_STOCK,
                 )
 
-                # 重複防止: 最初のテキストパートを取得
-                text = ""
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if part.text:
-                            text = part.text.strip()
-                            break
+                text = _extract_text(response)
                 if not text:
-                    try:
-                        text = response.text
-                    except (ValueError, AttributeError):
-                        raise RuntimeError("Gemini returned no valid text in response")
+                    raise RuntimeError("Gemini returned no valid text in response")
 
                 # finish_reasonがMAX_TOKENSで途切れたか判定
                 is_truncated = False
@@ -72,6 +96,7 @@ class GeminiService:
                 except Exception:
                     pass
 
+                logger.info(f"[Gemini] Stock report generated ({len(text)} chars, truncated={is_truncated})")
                 return {"text": text, "truncated": is_truncated}
 
             except Exception as e:
@@ -118,6 +143,7 @@ class GeminiService:
         prompt = "".join(prompt_parts)
 
         try:
+            logger.debug(f"[Gemini] Random chat: topics={topics[:30]}, trending={'あり' if trending_context else 'なし'}")
             response = await asyncio.wait_for(
                 self.client.aio.models.generate_content(
                     model=self.model_name,
@@ -131,19 +157,12 @@ class GeminiService:
                 timeout=_GEMINI_TIMEOUT_CHAT,
             )
 
-            # Google Search Grounding使用時、response.text は複数partsを
-            # 連結するため内容が重複することがある。最初のテキストpartだけを取得する。
-            if response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if part.text:
-                        return part.text.strip()
-
-            # フォールバック: partsが取れない場合はresponse.textを使用
-            try:
-                return response.text
-            except (ValueError, AttributeError):
+            text = _extract_text(response)
+            if not text:
                 logger.warning("Gemini returned no valid text for random chat")
                 return None
+            logger.debug(f"[Gemini] Random chat generated ({len(text)} chars)")
+            return text
         except Exception as e:
             logger.error(f"Error calling Gemini API for random chat: {e}")
             return None  # エラー時はNoneを返し、呼び出し元で処理
@@ -173,36 +192,44 @@ class GeminiService:
             )
         )
 
-        response = await asyncio.wait_for(
-            self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        personality + "\n\n"
-                        "【重要なルール】\n"
-                        "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
-                        "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
-                        "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
-                        "- **【重要】思考プロセスや解説、ドラフトなどは一切出力せず、チャットの返答本文のみを直接出力すること。**\n"
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"[Gemini] Chat response: history={len(chat_history)} msgs, user_msg={len(user_message)} chars (attempt {attempt + 1}/{max_retries})")
+                response = await asyncio.wait_for(
+                    self.client.aio.models.generate_content(
+                        model=self.model_name,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=(
+                                personality + "\n\n"
+                                "【重要なルール】\n"
+                                "- 返答は簡潔に。1〜3文（100文字程度）で返すこと。\n"
+                                "- 長文で解説しない。友達とのLINEやチャットのテンポ感を意識する。\n"
+                                "- 聞かれたことに端的に答え、必要なら一言感想を添える程度。\n"
+                                "- **【重要】思考プロセスや解説、ドラフトなどは一切出力せず、チャットの返答本文のみを直接出力すること。**\n"
+                            ),
+                            tools=[{"google_search": {}}],
+                            temperature=0.7
+                        )
                     ),
-                    tools=[{"google_search": {}}],
-                    temperature=0.7
+                    timeout=_GEMINI_TIMEOUT_CHAT,
                 )
-            ),
-            timeout=_GEMINI_TIMEOUT_CHAT,
-        )
 
-        # Google Search Grounding使用時の重複防止: 最初のテキストpartだけを取得
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.text:
-                    return part.text.strip()
+                text = _extract_text(response)
+                if not text:
+                    raise RuntimeError("Gemini returned no valid text for chat response")
+                return text
 
-        try:
-            return response.text
-        except (ValueError, AttributeError):
-            raise RuntimeError("Gemini returned no valid text for chat response")
+            except Exception as e:
+                logger.warning(f"[Gemini] Chat response error (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
 
     async def determine_character(self, user_message: str) -> str:
         """
@@ -224,29 +251,39 @@ class GeminiService:
             "- 挨拶や短い相槌（「おはよう」「ただいま」「暇だ」等）は一般的な雑談として扱い、毎回異なるキャラを選ぶこと。\n"
         )
 
-        try:
-            response = await asyncio.wait_for(
-                self.client.aio.models.generate_content(
-                    model=self.router_model_name,
-                    contents=user_message,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.5,  # 一般的な雑談での多様性を確保
-                    )
-                ),
-                timeout=_GEMINI_TIMEOUT_ROUTER,
-            )
-            result = response.text.strip()
-            logger.info(f"[AIルーター] 入力: '{user_message[:50]}' → 結果: '{result}'")
+        max_retries = 2
+        retry_delay = 1
 
-            for name in valid_names:
-                if name in result:
-                    return name
+        for attempt in range(max_retries):
+            try:
+                response = await asyncio.wait_for(
+                    self.client.aio.models.generate_content(
+                        model=self.router_model_name,
+                        contents=user_message,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=0.5,  # 一般的な雑談での多様性を確保
+                        )
+                    ),
+                    timeout=_GEMINI_TIMEOUT_ROUTER,
+                )
+                result = _extract_text(response) or ""
+                logger.info(f"[AIルーター] 入力: '{user_message[:50]}' → 結果: '{result}'")
 
-            # ルーターが有効な名前を返さなかった場合、ランダムに選択
-            logger.warning(f"[AIルーター] 有効な名前が含まれていません: '{result}' → ランダム選択")
-            return random.choice(valid_names)
-        except Exception as e:
-            logger.error(f"[AIルーター] エラー: {e} → ランダム選択にフォールバック")
-            return random.choice(valid_names)
+                for name in valid_names:
+                    if name in result:
+                        return name
+
+                # ルーターが有効な名前を返さなかった場合、ランダムに選択
+                logger.warning(f"[AIルーター] 有効な名前が含まれていません: '{result}' → ランダム選択")
+                return random.choice(valid_names)
+
+            except Exception as e:
+                logger.warning(f"[AIルーター] エラー (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error(f"[AIルーター] 全リトライ失敗 → ランダム選択にフォールバック")
+                    return random.choice(valid_names)
 
