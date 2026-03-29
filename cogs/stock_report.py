@@ -7,7 +7,8 @@ import aiohttp
 from datetime import datetime, timedelta
 from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, TZ_JST, TZ_NY
 from services.sheets_service import get_stocks_from_sheet
-from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices
+from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices, fetch_extended_chart, fetch_sector_etfs
+from services.technical_service import analyze_technicals, detect_signals, calculate_score, classify_action_priority, analyze_portfolio
 from services.gemini_service import GeminiService
 import prompts.stock_prompts as prompts
 
@@ -191,41 +192,59 @@ class StockReportCog(commands.Cog):
                 logger.warning(f"{report_name}: スプレッドシートに銘柄データがありません。レポートを中止します。")
                 return
 
-            # 2. Yahoo Financeから株価・企業情報 + 主要指数を並列取得（セッション共有）
+            # 2. Yahoo Financeから株価・企業情報 + 主要指数 + セクターETF を並列取得
             async with aiohttp.ClientSession() as session:
-                results = await asyncio.gather(
+                gather_tasks = [
                     self._fetch_all_stocks(holdings_list, market, session),
                     self._fetch_all_stocks(watchlist_list, market, session),
                     fetch_market_indices(market, session=session),
-                    return_exceptions=True,
-                )
+                ]
+                # 米国株の場合はセクターETFも取得
+                if market == "US":
+                    gather_tasks.append(fetch_sector_etfs(session=session))
+
+                results = await asyncio.gather(*gather_tasks, return_exceptions=True)
 
                 # 個別タスクの例外をチェック
-                task_names = ["保有銘柄取得", "監視銘柄取得", "指数取得"]
+                task_names = ["保有銘柄取得", "監視銘柄取得", "指数取得", "セクターETF取得"]
                 for i, result in enumerate(results):
-                    if isinstance(result, Exception):
+                    if isinstance(result, Exception) and i < 3:
+                        # 最初の3つ（必須タスク）が失敗したらエラー
                         logger.error(f"{report_name}: {task_names[i]}に失敗: {result}")
                         raise result
+                    elif isinstance(result, Exception):
+                        logger.warning(f"{report_name}: {task_names[i]}に失敗（続行）: {result}")
 
-                holdings_map, watchlist_map, indices = results
+                holdings_map = results[0] if not isinstance(results[0], Exception) else {}
+                watchlist_map = results[1] if not isinstance(results[1], Exception) else {}
+                indices = results[2] if not isinstance(results[2], Exception) else {}
+                sector_etfs = results[3] if len(results) > 3 and not isinstance(results[3], Exception) else None
+
                 logger.info(f"[{report_name}] 株価取得完了: Holdings={len(holdings_map)}件, Watchlist={len(watchlist_map)}件, 指数={len(indices)}件")
 
-            # 3. プロンプト生成（指数データ付き、戻り値は {"system_instruction": s, "user_prompt": u} の dict）
-            if market == "US":
-                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
-                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices)
-            else:
-                prompt_data = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
-                    else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices)
+                # 3. テクニカル分析用の拡張データ取得（6ヶ月分）+ シグナル検出
+                await self._enrich_with_technicals(holdings_map, market, session)
+                await self._enrich_with_technicals(watchlist_map, market, session)
 
-            # 4. Gemini でレポート生成
+            # 4. ポートフォリオ分析（保有銘柄のみ）
+            portfolio = analyze_portfolio(holdings_map) if holdings_map else None
+
+            # 5. プロンプト生成（テクニカル・マクロ・ポートフォリオデータ付き）
+            if market == "US":
+                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices, sector_etfs, portfolio) if weekly \
+                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices, sector_etfs, portfolio)
+            else:
+                prompt_data = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices, portfolio) if weekly \
+                    else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices, portfolio)
+
+            # 6. Gemini でレポート生成
             logger.info(f"Generating {report_name} using Gemini...")
             ai_result = await self.gemini.generate_stock_report(prompt_data)
             result_text = ai_result.get("text", "")
             if ai_result.get("truncated"):
                 result_text += "\n\n*(※文字数制限により途切れています)*"
 
-            # 5. Discord Webhook へ送信（Embedヘッダー + 本文テキスト）
+            # 7. Discord Webhook へ送信（Embedヘッダー + 本文テキスト）
             await self.send_stock_report(result_text, report_name, indices)
 
             elapsed = asyncio.get_running_loop().time() - start_time
@@ -235,6 +254,35 @@ class StockReportCog(commands.Cog):
             elapsed = asyncio.get_running_loop().time() - start_time
             logger.error(f"--- {report_name} workflow failed after {elapsed:.1f}s ---")
             await self.notify_error(f"{report_name} Workflow", e)
+
+    async def _enrich_with_technicals(self, stocks_map: dict, market: str,
+                                       session: aiohttp.ClientSession):
+        """各銘柄にテクニカル指標・シグナル・スコアを付与する"""
+        async def enrich_single(ticker: str, data: dict):
+            try:
+                full_ticker = f"{ticker}.T" if market == "JP" else ticker
+                ext = await fetch_extended_chart(full_ticker, session=session)
+                closes = ext["closes"]
+                volumes = ext["volumes"]
+
+                if len(closes) < 5:
+                    return
+
+                technicals = analyze_technicals(closes, volumes)
+                signals = detect_signals(ticker, closes, volumes, technicals,
+                                         category=data.get("category", ""))
+                score = calculate_score(technicals, signals)
+                priority = classify_action_priority(score, signals)
+
+                data["technicals"] = technicals
+                data["signals"] = signals
+                data["score"] = score
+                data["action_priority"] = priority
+            except Exception as e:
+                logger.warning(f"Technical analysis failed for {ticker}: {e}")
+
+        tasks = [enrich_single(ticker, data) for ticker, data in stocks_map.items()]
+        await asyncio.gather(*tasks)
 
     async def _fetch_all_stocks(self, stock_list: list[dict], market: str,
                                 session: aiohttp.ClientSession = None) -> dict:
@@ -287,11 +335,12 @@ class StockReportCog(commands.Cog):
                 "inline": True,
             })
 
-        # 全体的に上昇か下落かで色を決定（USD/JPY以外の変化率で判定）
+        # 全体的に上昇か下落かで色を決定（為替・利回りは除外）
         color = 0x808080  # グレー（デフォルト）
+        _exclude_from_color = {"USD/JPY", "米10年債利回り"}
         changes = []
         for label, data in indices.items():
-            if label == "USD/JPY":
+            if label in _exclude_from_color:
                 continue
             try:
                 pct = float(data["change"].replace("+", "").replace("%", ""))

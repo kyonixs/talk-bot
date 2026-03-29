@@ -29,7 +29,7 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
     """
     service = _get_sheets_service()
 
-    range_name = f"{sheet_name}!A:B"
+    range_name = f"{sheet_name}!A:D"
     sheet = service.spreadsheets()
     result = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
 
@@ -45,10 +45,29 @@ def _fetch_from_sheet_sync(sheet_name: str, spreadsheet_id: str) -> list[dict]:
             continue
 
         category = row[1].strip() if len(row) > 1 and row[1] else "未分類"
-        stocks.append({
-            "ticker": ticker,
-            "category": category
-        })
+
+        # C列: 取得単価（任意）
+        cost_basis = None
+        if len(row) > 2 and row[2]:
+            try:
+                cost_basis = float(row[2].strip().replace(",", ""))
+            except (ValueError, AttributeError):
+                pass
+
+        # D列: 保有株数（任意）
+        shares = None
+        if len(row) > 3 and row[3]:
+            try:
+                shares = float(row[3].strip().replace(",", ""))
+            except (ValueError, AttributeError):
+                pass
+
+        stock = {"ticker": ticker, "category": category}
+        if cost_basis is not None:
+            stock["cost_basis"] = cost_basis
+        if shares is not None:
+            stock["shares"] = shares
+        stocks.append(stock)
 
     logger.info(f"Loaded {len(stocks)} stocks from {sheet_name}")
     return stocks

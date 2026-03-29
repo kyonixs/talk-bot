@@ -34,11 +34,16 @@ def _extract_text(response) -> str | None:
             parts_info.append(f"  part[{i}]: thought_attr={has_thought}, thought={is_thought}, text={text_preview!r}")
         logger.debug(f"[_extract_text] {len(content.parts)} parts:\n" + "\n".join(parts_info))
 
+        # 非思考テキストを全て収集し、最後のものを返す
+        # （思考が普通テキストとして出力された場合、最終回答は最後のpartにある）
+        texts = []
         for part in content.parts:
             if getattr(part, "thought", False):
                 continue
             if part.text:
-                return part.text.strip()
+                texts.append(part.text.strip())
+        if texts:
+            return texts[-1]
     except (AttributeError, IndexError):
         pass
     return None
@@ -76,7 +81,8 @@ class GeminiService:
                             system_instruction=system_instruction,
                             tools=[{"google_search": {}}],
                             temperature=0.3,
-                            max_output_tokens=8192
+                            max_output_tokens=8192,
+                            thinking_config=types.ThinkingConfig(thinking_budget=0),
                         )
                     ),
                     timeout=_GEMINI_TIMEOUT_STOCK,
@@ -151,7 +157,8 @@ class GeminiService:
                     config=types.GenerateContentConfig(
                         system_instruction=personality,
                         tools=[{"google_search": {}}],
-                        temperature=0.8  # 雑談なので少しクリエイティブに
+                        temperature=0.8,  # 雑談なので少しクリエイティブに
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     )
                 ),
                 timeout=_GEMINI_TIMEOUT_CHAT,
@@ -212,7 +219,8 @@ class GeminiService:
                                 "- **【重要】思考プロセスや解説、ドラフトなどは一切出力せず、チャットの返答本文のみを直接出力すること。**\n"
                             ),
                             tools=[{"google_search": {}}],
-                            temperature=0.7
+                            temperature=0.7,
+                            thinking_config=types.ThinkingConfig(thinking_budget=0),
                         )
                     ),
                     timeout=_GEMINI_TIMEOUT_CHAT,

@@ -10,13 +10,16 @@ _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 # 日本株の企業名キャッシュ（プロセス存続中は再スクレイピングしない）
 _jp_name_cache: dict[str, str] = {}
 
-async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) -> dict:
-    """Yahoo Finance API (v8) からチャートデータを取得する"""
+async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None,
+                            chart_range: str = "5d") -> dict:
+    """Yahoo Finance API (v8) からチャートデータを取得する
+    chart_range: '5d', '1mo', '3mo', '6mo' など
+    """
     hosts = [
         "https://query1.finance.yahoo.com",
         "https://query2.finance.yahoo.com"
     ]
-    path = f"/v8/finance/chart/{ticker}?range=5d&interval=1d"
+    path = f"/v8/finance/chart/{ticker}?range={chart_range}&interval=1d"
     headers = {"User-Agent": USER_AGENT}
 
     owns_session = session is None
@@ -44,11 +47,14 @@ async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None) 
                     indicators = data.get("indicators", {})
                     quote = indicators.get("quote", [{}])[0]
                     closes = quote.get("close", [])
+                    volumes = quote.get("volume", [])
 
-                    # 不要な None などを除去
+                    # 不要な None などを除去（インデックスを揃えるため同時フィルタ）
                     valid_closes = [c for c in closes if c is not None]
+                    valid_volumes = [volumes[i] if i < len(volumes) and volumes[i] is not None else 0
+                                     for i, c in enumerate(closes) if c is not None]
 
-                    return {"meta": meta, "valid_closes": valid_closes}
+                    return {"meta": meta, "valid_closes": valid_closes, "valid_volumes": valid_volumes}
 
             except Exception as e:
                 last_error = e
@@ -66,6 +72,8 @@ async def fetch_market_indices(market: str, session: aiohttp.ClientSession = Non
         tickers = {
             "S&P 500": "^GSPC",
             "NASDAQ": "^IXIC",
+            "VIX": "^VIX",
+            "米10年債利回り": "^TNX",
             "USD/JPY": "JPY=X",
         }
     else:
@@ -75,6 +83,11 @@ async def fetch_market_indices(market: str, session: aiohttp.ClientSession = Non
             "USD/JPY": "JPY=X",
         }
 
+    # 利回り系は変化率ではなく差分（bps）で表示する
+    _yield_tickers = {"^TNX"}
+    # VIXはポイント差分で表示
+    _point_diff_tickers = {"^VIX"}
+
     results = {}
     for label, ticker in tickers.items():
         try:
@@ -83,12 +96,29 @@ async def fetch_market_indices(market: str, session: aiohttp.ClientSession = Non
             if len(closes) >= 2:
                 current = closes[-1]
                 prev = closes[-2]
-                pct = ((current - prev) / prev) * 100 if prev is not None and prev != 0 else 0
-                sign = "+" if pct >= 0 else ""
-                results[label] = {
-                    "value": round(current, 2),
-                    "change": f"{sign}{pct:.2f}%",
-                }
+                if ticker in _yield_tickers:
+                    # 利回り: 差分をbps (basis points) で表示
+                    diff = (current - prev) * 100  # 1% = 100bps
+                    sign = "+" if diff >= 0 else ""
+                    results[label] = {
+                        "value": f"{current:.2f}%",
+                        "change": f"{sign}{diff:.1f}bps",
+                    }
+                elif ticker in _point_diff_tickers:
+                    # VIX等: ポイント差分で表示
+                    diff = current - prev
+                    sign = "+" if diff >= 0 else ""
+                    results[label] = {
+                        "value": f"{current:.2f}",
+                        "change": f"{sign}{diff:.2f}pt",
+                    }
+                else:
+                    pct = ((current - prev) / prev) * 100 if prev is not None and prev != 0 else 0
+                    sign = "+" if pct >= 0 else ""
+                    results[label] = {
+                        "value": round(current, 2),
+                        "change": f"{sign}{pct:.2f}%",
+                    }
             elif closes:
                 results[label] = {"value": round(closes[-1], 2), "change": "-"}
             else:
@@ -97,6 +127,48 @@ async def fetch_market_indices(market: str, session: aiohttp.ClientSession = Non
             logger.warning(f"Failed to fetch index {label} ({ticker}): {e}")
             results[label] = {"value": "-", "change": "-"}
 
+    return results
+
+
+async def fetch_extended_chart(ticker: str, session: aiohttp.ClientSession = None) -> dict:
+    """テクニカル分析用に1年分の日足データ（終値・出来高）を取得する"""
+    try:
+        chart_data = await fetch_yahoo_chart(ticker, session=session, chart_range="1y")
+        return {
+            "closes": chart_data["valid_closes"],
+            "volumes": chart_data["valid_volumes"],
+        }
+    except Exception as e:
+        logger.warning(f"Failed to fetch extended chart for {ticker}: {e}")
+        return {"closes": [], "volumes": []}
+
+
+async def fetch_sector_etfs(session: aiohttp.ClientSession = None) -> dict:
+    """米国セクターETFの直近パフォーマンスを取得する"""
+    etfs = {
+        "XLK": "テクノロジー",
+        "XLF": "金融",
+        "XLE": "エネルギー",
+        "XLV": "ヘルスケア",
+        "XLI": "資本財",
+        "XLP": "生活必需品",
+        "XLY": "一般消費財",
+        "XLU": "公益",
+    }
+    results = {}
+    for ticker, name in etfs.items():
+        try:
+            chart_data = await fetch_yahoo_chart(ticker, session=session)
+            closes = chart_data["valid_closes"]
+            if len(closes) >= 2:
+                pct = ((closes[-1] - closes[-2]) / closes[-2]) * 100
+                sign = "+" if pct >= 0 else ""
+                results[name] = f"{sign}{pct:.2f}%"
+            else:
+                results[name] = "-"
+        except Exception as e:
+            logger.warning(f"Failed to fetch sector ETF {ticker}: {e}")
+            results[name] = "-"
     return results
 
 
