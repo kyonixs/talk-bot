@@ -3,13 +3,15 @@ import logging
 import random
 from google import genai
 from google.genai import types
+from config.gemini_config import GEMINI_CONFIG
 
 logger = logging.getLogger(__name__)
 
-# Gemini APIリクエストのタイムアウト（秒）
-_GEMINI_TIMEOUT_STOCK = 120  # 株式レポート（長文生成のため長め）
-_GEMINI_TIMEOUT_CHAT = 30    # 雑談・会話
-_GEMINI_TIMEOUT_ROUTER = 10  # ルーター（短い応答のみ）
+# 設定ショートカット
+_STOCK_CFG = GEMINI_CONFIG["stock_report"]
+_CHAT_CFG = GEMINI_CONFIG["chat"]
+_RANDOM_CFG = GEMINI_CONFIG["random_chat"]
+_ROUTER_CFG = GEMINI_CONFIG["router"]
 
 
 def _extract_text(response) -> str | None:
@@ -56,8 +58,8 @@ class GeminiService:
             raise ValueError("API key must be provided to initialize GeminiService.")
 
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-2.5-flash"
-        self.router_model_name = "gemini-2.0-flash-lite"  # Router用軽量モデル
+        self.model_name = _STOCK_CFG["model"]
+        self.router_model_name = _ROUTER_CFG["model"]
 
     async def generate_stock_report(self, prompt_data: dict) -> dict:
         """
@@ -73,19 +75,24 @@ class GeminiService:
         for attempt in range(max_retries):
             try:
                 logger.info(f"[Gemini] Stock report generation (attempt {attempt + 1}/{max_retries}, prompt={len(user_prompt)} chars)")
+                # thinking_config の構築（thinking_budget=None の場合は思考なし）
+                thinking_cfg = types.ThinkingConfig(thinking_budget=_STOCK_CFG["thinking_budget"]) \
+                    if _STOCK_CFG["thinking_budget"] is not None else None
+                gen_config = types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    tools=[{"google_search": {}}],
+                    temperature=_STOCK_CFG["temperature"],
+                    max_output_tokens=_STOCK_CFG["max_output_tokens"],
+                )
+                if thinking_cfg:
+                    gen_config.thinking_config = thinking_cfg
                 response = await asyncio.wait_for(
                     self.client.aio.models.generate_content(
                         model=self.model_name,
                         contents=user_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            tools=[{"google_search": {}}],
-                            temperature=0.3,
-                            max_output_tokens=8192,
-                            thinking_config=types.ThinkingConfig(thinking_budget=0),
-                        )
+                        config=gen_config,
                     ),
-                    timeout=_GEMINI_TIMEOUT_STOCK,
+                    timeout=_STOCK_CFG["timeout"],
                 )
 
                 text = _extract_text(response)
@@ -157,11 +164,11 @@ class GeminiService:
                     config=types.GenerateContentConfig(
                         system_instruction=personality,
                         tools=[{"google_search": {}}],
-                        temperature=0.8,  # 雑談なので少しクリエイティブに
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        temperature=_RANDOM_CFG["temperature"],
+                        thinking_config=types.ThinkingConfig(thinking_budget=_RANDOM_CFG["thinking_budget"]),
                     )
                 ),
-                timeout=_GEMINI_TIMEOUT_CHAT,
+                timeout=_RANDOM_CFG["timeout"],
             )
 
             text = _extract_text(response)
@@ -219,11 +226,11 @@ class GeminiService:
                                 "- **【重要】思考プロセスや解説、ドラフトなどは一切出力せず、チャットの返答本文のみを直接出力すること。**\n"
                             ),
                             tools=[{"google_search": {}}],
-                            temperature=0.7,
-                            thinking_config=types.ThinkingConfig(thinking_budget=0),
+                            temperature=_CHAT_CFG["temperature"],
+                            thinking_config=types.ThinkingConfig(thinking_budget=_CHAT_CFG["thinking_budget"]),
                         )
                     ),
-                    timeout=_GEMINI_TIMEOUT_CHAT,
+                    timeout=_CHAT_CFG["timeout"],
                 )
 
                 text = _extract_text(response)
@@ -270,10 +277,10 @@ class GeminiService:
                         contents=user_message,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
-                            temperature=0.5,  # 一般的な雑談での多様性を確保
+                            temperature=_ROUTER_CFG["temperature"],
                         )
                     ),
-                    timeout=_GEMINI_TIMEOUT_ROUTER,
+                    timeout=_ROUTER_CFG["timeout"],
                 )
                 result = _extract_text(response) or ""
                 logger.info(f"[AIルーター] 入力: '{user_message[:50]}' → 結果: '{result}'")

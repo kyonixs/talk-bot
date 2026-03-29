@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holiday, TZ_JST, TZ_NY
 from services.sheets_service import get_stocks_from_sheet
 from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices, fetch_extended_chart, fetch_sector_etfs
-from services.technical_service import analyze_technicals, detect_signals, calculate_score, classify_action_priority, analyze_portfolio
+from services.technical_service import analyze_technicals, detect_signals, calculate_score, classify_action_priority, analyze_portfolio, detect_sector_rotation
 from services.gemini_service import GeminiService
 import prompts.stock_prompts as prompts
 
@@ -25,6 +25,9 @@ class StockReportCog(commands.Cog):
 
         # 同時実行を防ぐロック
         self._report_lock = asyncio.Lock()
+
+        # 同時APIリクエスト数を制限（e2-microのOOM回避）
+        self._api_semaphore = asyncio.Semaphore(5)
 
         # Webhook送信用の共有セッション（cog_unloadで閉じる）
         self._webhook_session: aiohttp.ClientSession | None = None
@@ -222,22 +225,39 @@ class StockReportCog(commands.Cog):
 
                 logger.info(f"[{report_name}] 株価取得完了: Holdings={len(holdings_map)}件, Watchlist={len(watchlist_map)}件, 指数={len(indices)}件")
 
-                # 3. テクニカル分析用の拡張データ取得（6ヶ月分）+ シグナル検出
-                await self._enrich_with_technicals(holdings_map, market, session)
-                await self._enrich_with_technicals(watchlist_map, market, session)
+                # 3. ベンチマーク指数の拡張チャートを1回だけ取得（相対パフォーマンス用）
+                benchmark_ticker = "^GSPC" if market == "US" else "^N225"
+                try:
+                    async with self._api_semaphore:
+                        bench_ext = await fetch_extended_chart(benchmark_ticker, session=session)
+                    benchmark_closes = bench_ext["closes"]
+                except Exception as e:
+                    logger.warning(f"ベンチマーク取得失敗（{benchmark_ticker}）: {e}")
+                    benchmark_closes = []
 
-            # 4. ポートフォリオ分析（保有銘柄のみ）
+                # 4. テクニカル分析用の拡張データ取得 + シグナル検出
+                #    日次: 変動の大きい銘柄のみ1年データ取得（パフォーマンス最適化）
+                is_daily = not weekly
+                await self._enrich_with_technicals(holdings_map, market, session,
+                                                   daily=is_daily, benchmark_closes=benchmark_closes)
+                await self._enrich_with_technicals(watchlist_map, market, session,
+                                                   daily=is_daily, benchmark_closes=benchmark_closes)
+
+                # 5. セクターローテーション分析（米国株のみ）
+                rotation = detect_sector_rotation(sector_etfs) if sector_etfs else None
+
+            # 6. ポートフォリオ分析（保有銘柄のみ）
             portfolio = analyze_portfolio(holdings_map) if holdings_map else None
 
-            # 5. プロンプト生成（テクニカル・マクロ・ポートフォリオデータ付き）
+            # 7. プロンプト生成（テクニカル・マクロ・ポートフォリオデータ付き）
             if market == "US":
-                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices, sector_etfs, portfolio) if weekly \
-                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices, sector_etfs, portfolio)
+                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices, sector_etfs, portfolio, rotation) if weekly \
+                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices, sector_etfs, portfolio, rotation)
             else:
                 prompt_data = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices, portfolio) if weekly \
                     else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices, portfolio)
 
-            # 6. Gemini でレポート生成
+            # 8. Gemini でレポート生成
             logger.info(f"Generating {report_name} using Gemini...")
             ai_result = await self.gemini.generate_stock_report(prompt_data)
             result_text = ai_result.get("text", "")
@@ -256,33 +276,51 @@ class StockReportCog(commands.Cog):
             await self.notify_error(f"{report_name} Workflow", e)
 
     async def _enrich_with_technicals(self, stocks_map: dict, market: str,
-                                       session: aiohttp.ClientSession):
-        """各銘柄にテクニカル指標・シグナル・スコアを付与する"""
+                                       session: aiohttp.ClientSession,
+                                       daily: bool = False,
+                                       benchmark_closes: list[float] = None):
+        """各銘柄にテクニカル指標・シグナル・スコアを付与する
+        daily=True の場合、変動の小さい銘柄は1年チャート取得をスキップする
+        benchmark_closes: 相対パフォーマンス算出用のベンチマーク終値データ
+        """
         async def enrich_single(ticker: str, data: dict):
-            try:
-                full_ticker = f"{ticker}.T" if market == "JP" else ticker
-                ext = await fetch_extended_chart(full_ticker, session=session)
-                closes = ext["closes"]
-                volumes = ext["volumes"]
+            async with self._api_semaphore:
+                try:
+                    # 日次レポートで変動率1%未満の銘柄は拡張チャート取得をスキップ
+                    if daily:
+                        change_str = data.get("change", "")
+                        try:
+                            raw = change_str.replace("+", "").replace("%", "").replace("pt", "").replace("bps", "")
+                            abs_pct = abs(float(raw)) if raw else 0
+                        except (ValueError, TypeError):
+                            abs_pct = 0
+                        if abs_pct < 1.0:
+                            return
 
-                if len(closes) < 5:
-                    return
+                    full_ticker = f"{ticker}.T" if market == "JP" else ticker
+                    ext = await fetch_extended_chart(full_ticker, session=session)
+                    closes = ext["closes"]
+                    volumes = ext["volumes"]
 
-                technicals = analyze_technicals(closes, volumes)
-                signals = detect_signals(ticker, closes, volumes, technicals,
-                                         category=data.get("category", ""))
-                score = calculate_score(technicals, signals)
-                priority = classify_action_priority(score, signals)
+                    if len(closes) < 5:
+                        return
 
-                data["technicals"] = technicals
-                data["signals"] = signals
-                data["score"] = score
-                data["action_priority"] = priority
-            except Exception as e:
-                logger.warning(f"Technical analysis failed for {ticker}: {e}")
+                    technicals = analyze_technicals(closes, volumes,
+                                                     benchmark_closes=benchmark_closes)
+                    signals = detect_signals(ticker, closes, volumes, technicals,
+                                             category=data.get("category", ""))
+                    score = calculate_score(technicals, signals)
+                    priority = classify_action_priority(score, signals)
 
-        tasks = [enrich_single(ticker, data) for ticker, data in stocks_map.items()]
-        await asyncio.gather(*tasks)
+                    data["technicals"] = technicals
+                    data["signals"] = signals
+                    data["score"] = score
+                    data["action_priority"] = priority
+                except Exception as e:
+                    logger.warning(f"Technical analysis failed for {ticker}: {e}")
+
+        enrich_tasks = [enrich_single(ticker, data) for ticker, data in stocks_map.items()]
+        await asyncio.gather(*enrich_tasks)
 
     async def _fetch_all_stocks(self, stock_list: list[dict], market: str,
                                 session: aiohttp.ClientSession = None) -> dict:
@@ -295,18 +333,19 @@ class StockReportCog(commands.Cog):
 
         try:
             async def fetch_single(stock: dict):
-                ticker = stock["ticker"]
-                try:
-                    if market == "US":
-                        data = await fetch_us_stock(ticker, session=session)
-                    else:
-                        data = await fetch_jp_stock(ticker, session=session)
+                async with self._api_semaphore:
+                    ticker = stock["ticker"]
+                    try:
+                        if market == "US":
+                            data = await fetch_us_stock(ticker, session=session)
+                        else:
+                            data = await fetch_jp_stock(ticker, session=session)
 
-                    # dictにマージして保存
-                    stock_map[ticker] = {**stock, **data}
-                except Exception as e:
-                    logger.warning(f"Error fetching {ticker}: {e}")
-                    stock_map[ticker] = {**stock, "price": "Error", "change": "-", "weeklyChange": "-", "name": ticker}
+                        # dictにマージして保存
+                        stock_map[ticker] = {**stock, **data}
+                    except Exception as e:
+                        logger.warning(f"Error fetching {ticker}: {e}")
+                        stock_map[ticker] = {**stock, "price": "Error", "change": "-", "weeklyChange": "-", "name": ticker}
 
             for stock in stock_list:
                 fetch_tasks.append(fetch_single(stock))
@@ -343,7 +382,8 @@ class StockReportCog(commands.Cog):
             if label in _exclude_from_color:
                 continue
             try:
-                pct = float(data["change"].replace("+", "").replace("%", ""))
+                raw = data["change"].replace("+", "").replace("%", "").replace("pt", "").replace("bps", "")
+                pct = float(raw)
                 changes.append(pct)
             except (ValueError, KeyError):
                 pass

@@ -27,12 +27,16 @@ TONE_INSTRUCTION = (
 
 TECHNICAL_INSTRUCTION = (
     "# テクニカル指標の扱い\n"
-    "提供されたテクニカルデータ（RSI, MACD, BB, 移動平均線, 出来高変化率, トレンドコンテキスト）は以下のように活用する:\n"
+    "提供されたテクニカルデータ（RSI, MACD, BB, 移動平均線, 出来高変化率, ATR, ドローダウン, トレンドコンテキスト）は以下のように活用する:\n"
     "- RSI: 70以上=買われすぎ、30以下=売られすぎの判断材料\n"
     "- MACD: ゴールデンクロス/デッドクロスはトレンド転換のシグナル\n"
     "- ボリンジャーバンド: %Bが1超=上限突破（過熱）、0未満=下限突破（売られすぎ）\n"
     "- 移動平均線: 5日/25日/75日/200日のクロスや乖離率でトレンド判定\n"
     "- 出来高変化率: 2倍以上は異常出来高として注目\n"
+    "- ATR(%): ボラティリティの銘柄間比較に使用。「この銘柄は日次変動がATR2%と大きい」など\n"
+    "- ドローダウン: ピークからの下落幅。-10%以上は要注意、-20%以上は深刻\n"
+    "- ダイバージェンス: 価格とオシレーターの乖離。反転の早期警告として重要\n"
+    "- α（アルファ）: ベンチマークとの超過リターン。正なら市場をアウトパフォーム\n"
     "- スコア: Bull/Bear/Neutralは総合判定の参考値として自然に組み込む\n"
     "- **テクニカル指標を一覧表として羅列しない。分析の文脈で自然に言及すること**\n\n"
     "# 中期・長期トレンドの扱い\n"
@@ -41,7 +45,24 @@ TECHNICAL_INSTRUCTION = (
     "- 週次レポート: 中長期トレンドをより積極的に分析に組み込む。特に52週高値/安値付近の銘柄、トレンド転換が見える銘柄に注目\n"
     "- **中長期分析で別セクションを作らない。既存セクション内で簡潔に織り込むこと**\n"
     "- 全銘柄のトレンドを逐一述べる必要はない。注目すべき銘柄のみ言及する\n\n"
+    "# セクターETFデータの扱い\n"
+    "提供されたセクター別パフォーマンス（米国ETF）は以下のように活用する:\n"
+    "- 各保有銘柄の値動きを所属セクターの動きと対比して説明する（例: 「XLKが+1.5%の中でAAPLは+2.3%と相対的に強い」）\n"
+    "- セクター間の資金シフト（ローテーション）の兆候があれば指摘する\n"
+    "- ディフェンシブセクター（公益・生活必需品）とシクリカルセクターの強弱差に注目する\n\n"
+    "# シグナル優先度の階層\n"
+    "各銘柄のシグナルには以下の優先度がある。レポートではこの順序で重要度を反映すること:\n"
+    "1. **alert** (🚨): 即座に確認が必要（出来高急増、急騰急落）→ 最優先で詳述\n"
+    "2. **warning** (⚠️): 注意が必要（RSI買われすぎ、BB上限突破、ダイバージェンス、ドローダウン）→ 具体的リスクを述べる\n"
+    "3. **bullish/bearish** (📈📉): トレンド転換シグナル（MACDクロス、MAクロス）→ 文脈を添えて言及\n"
+    "4. **opportunity** (💡): 逆張りチャンス候補（RSI売られすぎ、BB下限突破、ブリッシュダイバージェンス）→ 条件付きで言及\n\n"
+    "# 静かな日のルール\n"
+    "市場全体が±0.5%以内で個別銘柄にもシグナルが少ない場合:\n"
+    "- 「今日は大きな動きなし」と一言で済ませてよい\n"
+    "- 無理に各銘柄を分析しない。静かな日は短いレポートが正義\n"
+    "- 「特に報告事項なし」で終わっても構わない\n\n"
 )
+
 
 
 # ============================================================
@@ -114,10 +135,24 @@ def format_stocks_for_prompt(stocks_map: dict, weekly: bool = False) -> str:
                     tech_parts.append(f"MACDクロス: {macd['cross']}")
             if tech.get("volume_ratio") is not None:
                 tech_parts.append(f"出来高倍率: {tech['volume_ratio']}x")
+            # 新指標: ATR
+            if tech.get("atr_pct") is not None:
+                tech_parts.append(f"ATR: {tech['atr_pct']}%")
             if tech_parts:
                 line += f"\n  テクニカル: {' | '.join(tech_parts)}"
 
-        # トレンドコンテキスト（中期・長期、1行に凝縮）
+        # ドローダウン（有意な場合のみ表示）
+        dd = tech.get("drawdown") if tech else None
+        if dd and dd["drawdown_pct"] < -5:
+            line += f"\n  ドローダウン: ピークから{dd['drawdown_pct']:+.1f}%（{dd['days_from_peak']}日経過）"
+
+        # 相対パフォーマンス（α）
+        alpha = tech.get("alpha") if tech else None
+        if alpha:
+            alpha_parts = [f"{k}:α{v:+.1f}%" for k, v in alpha.items()]
+            line += f"\n  α: {' | '.join(alpha_parts)}"
+
+        # トレンドコンテキスト（中期・長期、１行に凝縮）
         trend = tech.get("trend") if tech else None
         if trend:
             trend_parts = [trend["direction"], trend["alignment"]]
@@ -194,13 +229,25 @@ def format_portfolio_for_prompt(portfolio: dict) -> str:
     return "\n".join(lines)
 
 
+def format_rotation_for_prompt(rotation: dict) -> str:
+    """セクターローテーション分析結果をプロンプト用に文字列化する"""
+    if not rotation:
+        return ""
+    lines = ["# セクターローテーション分析"]
+    lines.append(f"- レジーム: {rotation['regime']}")
+    lines.append(f"- シクリカル平均: {rotation['avg_cyclical']:+.2f}%")
+    lines.append(f"- ディフェンシブ平均: {rotation['avg_defensive']:+.2f}%")
+    lines.append(f"- スプレッド: {rotation['spread']:+.2f}%")
+    return "\n".join(lines)
+
+
 # ============================================================
 # US Prompts
 # ============================================================
 
 def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict,
                           indices: dict = None, sector_etfs: dict = None,
-                          portfolio: dict = None) -> dict:
+                          portfolio: dict = None, rotation: dict = None) -> dict:
     holdings = format_stocks_for_prompt(holdings_map)
     watchlist = format_stocks_for_prompt(watchlist_map)
     indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
@@ -238,6 +285,8 @@ def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict,
     parts.append("# 注目銘柄データ\n" + watchlist)
     if portfolio:
         parts.append(format_portfolio_for_prompt(portfolio))
+    if rotation:
+        parts.append(format_rotation_for_prompt(rotation))
     parts.append("上記のデータに基づき、本日の日次レポートを作成してください。")
 
     user_prompt = "\n\n".join(parts)
@@ -246,7 +295,7 @@ def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict,
 
 def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict,
                            indices: dict = None, sector_etfs: dict = None,
-                           portfolio: dict = None) -> dict:
+                           portfolio: dict = None, rotation: dict = None) -> dict:
     holdings = format_stocks_for_prompt(holdings_map, weekly=True)
     watchlist = format_stocks_for_prompt(watchlist_map, weekly=True)
     indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
@@ -282,6 +331,8 @@ def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict,
     parts.append("# 注目銘柄データ（週間）\n" + watchlist)
     if portfolio:
         parts.append(format_portfolio_for_prompt(portfolio))
+    if rotation:
+        parts.append(format_rotation_for_prompt(rotation))
     parts.append("上記のデータに基づき、今週の週次レポートを作成してください。")
 
     user_prompt = "\n\n".join(parts)

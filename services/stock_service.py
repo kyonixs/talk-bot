@@ -49,10 +49,11 @@ async def fetch_yahoo_chart(ticker: str, session: aiohttp.ClientSession = None,
                     closes = quote.get("close", [])
                     volumes = quote.get("volume", [])
 
-                    # 不要な None などを除去（インデックスを揃えるため同時フィルタ）
-                    valid_closes = [c for c in closes if c is not None]
-                    valid_volumes = [volumes[i] if i < len(volumes) and volumes[i] is not None else 0
-                                     for i, c in enumerate(closes) if c is not None]
+                    # 不要な None を除去（closes と volumes のペアを保ったままフィルタ）
+                    paired = [(c, volumes[i] if i < len(volumes) else 0)
+                              for i, c in enumerate(closes) if c is not None]
+                    valid_closes = [c for c, _ in paired]
+                    valid_volumes = [v if v is not None else 0 for _, v in paired]
 
                     return {"meta": meta, "valid_closes": valid_closes, "valid_volumes": valid_volumes}
 

@@ -143,16 +143,15 @@ def calculate_macd(closes: list[float], fast: int = 12, slow: int = 26, signal: 
     histogram = macd_val - signal_val
 
     # クロス検出（直近2日）
+    # _ema_series の特性上、signal_line[-1] は macd_line[-1] 時点に対応
     cross = "none"
-    if len(macd_line) >= 2 and len(signal_line) >= 2:
+    if len(signal_line) >= 2:
         prev_macd = macd_line[-2]
-        signal_offset = len(macd_line) - len(signal_line)
-        if signal_offset >= 0 and len(signal_line) >= 2:
-            prev_signal = signal_line[-2]
-            if prev_macd <= prev_signal and macd_val > signal_val:
-                cross = "golden"
-            elif prev_macd >= prev_signal and macd_val < signal_val:
-                cross = "dead"
+        prev_signal = signal_line[-2]
+        if prev_macd <= prev_signal and macd_val > signal_val:
+            cross = "golden"
+        elif prev_macd >= prev_signal and macd_val < signal_val:
+            cross = "dead"
 
     return {
         "macd": round(macd_val, 4),
@@ -173,11 +172,50 @@ def calculate_volume_ratio(volumes: list[float], period: int = 20) -> float | No
     return valid[-1] / avg
 
 
+def calculate_atr(closes: list[float], period: int = 14) -> float | None:
+    """ATR (Average True Range) — close-to-close方式の簡易版
+    High/Lowデータがないため、日次変化の絶対値をTrue Rangeとして使用する
+    """
+    if len(closes) < period + 1:
+        return None
+    true_ranges = [abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))]
+    # Wilder's smoothing
+    atr = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
+def calculate_drawdown(closes: list[float]) -> dict | None:
+    """直近ピークからのドローダウン（下落率）と経過日数を計算する"""
+    if len(closes) < 2:
+        return None
+    peak = max(closes)
+    current = closes[-1]
+    drawdown_pct = ((current - peak) / peak) * 100
+    peak_idx = closes.index(peak)
+    days_from_peak = len(closes) - 1 - peak_idx
+    return {"drawdown_pct": round(drawdown_pct, 2), "days_from_peak": days_from_peak}
+
+
+def calculate_relative_performance(stock_closes: list[float],
+                                    benchmark_closes: list[float]) -> dict | None:
+    """各期間のα（銘柄リターン − ベンチマークリターン）を算出する"""
+    result = {}
+    for label, days in [("1w", 5), ("1m", 21), ("3m", 63)]:
+        if len(stock_closes) > days and len(benchmark_closes) > days:
+            stock_ret = ((stock_closes[-1] - stock_closes[-days - 1]) / stock_closes[-days - 1]) * 100
+            bench_ret = ((benchmark_closes[-1] - benchmark_closes[-days - 1]) / benchmark_closes[-days - 1]) * 100
+            result[label] = round(stock_ret - bench_ret, 2)
+    return result if result else None
+
+
 # ============================================================
 # 総合テクニカル分析（1銘柄分）
 # ============================================================
 
-def analyze_technicals(closes: list[float], volumes: list[float] = None) -> dict:
+def analyze_technicals(closes: list[float], volumes: list[float] = None,
+                       benchmark_closes: list[float] = None) -> dict:
     """1銘柄の全テクニカル指標を計算して返す"""
     result = {}
 
@@ -207,6 +245,25 @@ def analyze_technicals(closes: list[float], volumes: list[float] = None) -> dict
         vol_ratio = calculate_volume_ratio(volumes)
         if vol_ratio is not None:
             result["volume_ratio"] = round(vol_ratio, 2)
+
+    # ATR（ボラティリティ指標）
+    atr = calculate_atr(closes)
+    if atr is not None:
+        current = closes[-1]
+        # ATRを価格比率（%）で正規化して銘柄間比較を可能にする
+        result["atr"] = round(atr, 2)
+        result["atr_pct"] = round((atr / current) * 100, 2) if current > 0 else 0
+
+    # ドローダウン
+    dd = calculate_drawdown(closes)
+    if dd:
+        result["drawdown"] = dd
+
+    # 相対パフォーマンス（ベンチマーク比較）
+    if benchmark_closes:
+        alpha = calculate_relative_performance(closes, benchmark_closes)
+        if alpha:
+            result["alpha"] = alpha
 
     # スパークライン
     result["sparkline"] = generate_sparkline(closes)
@@ -404,6 +461,17 @@ def detect_signals(ticker: str, closes: list[float], volumes: list[float] = None
             signals.append({"type": "price_alert", "severity": "alert",
                             "message": f"{direction} {daily_pct:+.2f}%（閾値±{threshold:.1f}%）"})
 
+    # 8. ダイバージェンス検出（価格新高値/安値 vs RSI/MACD の乖離）
+    div = _detect_divergence(closes, technicals)
+    if div:
+        signals.append(div)
+
+    # 9. ドローダウン警告（ピークから-15%以上）
+    dd = technicals.get("drawdown")
+    if dd and dd["drawdown_pct"] <= -15:
+        signals.append({"type": "drawdown_alert", "severity": "warning",
+                        "message": f"ピークから{dd['drawdown_pct']:.1f}%下落（{dd['days_from_peak']}日経過）"})
+
     return signals
 
 
@@ -436,6 +504,86 @@ def _get_volatility_threshold(closes: list[float], category: str = "") -> float:
 
     # 閾値 = 2σ（最低1.0%、最大5.0%）
     return max(1.0, min(5.0, std * 2))
+
+
+def _detect_divergence(closes: list[float], technicals: dict) -> dict | None:
+    """ベアリッシュ/ブリッシュダイバージェンスを簡易検出する
+    直近20日間で価格が新高値（安値）をつけたがRSI/MACDが追随していないケースを検出する
+    """
+    if len(closes) < 20:
+        return None
+
+    rsi = technicals.get("rsi")
+    macd = technicals.get("macd")
+    if rsi is None and macd is None:
+        return None
+
+    recent = closes[-20:]
+    current = closes[-1]
+    prev_high = max(recent[:-1])
+    prev_low = min(recent[:-1])
+
+    # ベアリッシュダイバージェンス: 価格が新高値だがRSIが70未満で下降傾向
+    if current >= prev_high and rsi is not None and rsi < 65:
+        return {"type": "bearish_divergence", "severity": "warning",
+                "message": f"ベアリッシュダイバージェンス検出（価格新高値 but RSI={rsi:.0f}）"}
+
+    # ブリッシュダイバージェンス: 価格が新安値だがRSIが30超で上昇傾向
+    if current <= prev_low and rsi is not None and rsi > 35:
+        return {"type": "bullish_divergence", "severity": "opportunity",
+                "message": f"ブリッシュダイバージェンス検出（価格新安値 but RSI={rsi:.0f}）"}
+
+    return None
+
+
+def detect_sector_rotation(sector_etfs: dict) -> dict | None:
+    """セクターETFのパフォーマンス差からリスクオン/オフの傾向を検出する
+    ディフェンシブセクターが優位ならリスクオフ、シクリカルが優位ならリスクオン
+    """
+    if not sector_etfs:
+        return None
+
+    defensive_names = {"生活必需品", "ヘルスケア", "公益"}
+    cyclical_names = {"テクノロジー", "金融", "一般消費財", "資本財", "エネルギー"}
+
+    def _parse_pct(s: str) -> float | None:
+        try:
+            return float(s.replace("+", "").replace("%", ""))
+        except (ValueError, TypeError):
+            return None
+
+    def_pcts = []
+    cyc_pcts = []
+    for name, change in sector_etfs.items():
+        pct = _parse_pct(change)
+        if pct is None:
+            continue
+        if name in defensive_names:
+            def_pcts.append(pct)
+        elif name in cyclical_names:
+            cyc_pcts.append(pct)
+
+    if not def_pcts or not cyc_pcts:
+        return None
+
+    avg_def = sum(def_pcts) / len(def_pcts)
+    avg_cyc = sum(cyc_pcts) / len(cyc_pcts)
+    spread = avg_cyc - avg_def
+
+    # スプレッドが有意（±0.5%以上）なら傾向として報告
+    if abs(spread) < 0.5:
+        regime = "中立"
+    elif spread > 0:
+        regime = "リスクオン"
+    else:
+        regime = "リスクオフ"
+
+    return {
+        "regime": regime,
+        "spread": round(spread, 2),
+        "avg_cyclical": round(avg_cyc, 2),
+        "avg_defensive": round(avg_def, 2),
+    }
 
 
 # ============================================================
