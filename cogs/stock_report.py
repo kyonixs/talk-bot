@@ -9,6 +9,7 @@ from config.stock_config import STOCK_CONFIG, get_us_market_close_jst, is_holida
 from services.sheets_service import get_stocks_from_sheet
 from services.stock_service import fetch_us_stock, fetch_jp_stock, fetch_market_indices
 from services.gemini_service import GeminiService
+from services.claude_service import ClaudeService
 import prompts.stock_prompts as prompts
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,16 @@ class StockReportCog(commands.Cog):
         self.gemini = GeminiService(api_key=bot.gemini_api_key_stock)
         self.webhook_url = bot.discord_webhook_stock
         self.spreadsheet_id = bot.spreadsheet_id
+
+        # Claude（レポート生成・推論フェーズ）— APIキーが未設定の場合はGeminiのみで動作
+        self.claude: ClaudeService | None = None
+        anthropic_key = getattr(bot, "anthropic_api_key", None)
+        if anthropic_key:
+            try:
+                self.claude = ClaudeService(api_key=anthropic_key)
+                logger.info("ClaudeService initialized (2-stage pipeline enabled)")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ClaudeService: {e}")
 
         # 同時実行を防ぐロック
         self._report_lock = asyncio.Lock()
@@ -210,17 +221,38 @@ class StockReportCog(commands.Cog):
                 holdings_map, watchlist_map, indices = results
                 logger.info(f"[{report_name}] 株価取得完了: Holdings={len(holdings_map)}件, Watchlist={len(watchlist_map)}件, 指数={len(indices)}件")
 
-            # 3. プロンプト生成（指数データ付き、戻り値は {"system_instruction": s, "user_prompt": u} の dict）
-            if market == "US":
-                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
-                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices)
-            else:
-                prompt_data = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices) if weekly \
-                    else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices)
+            # 3a. Stage 1: Gemini でニュース収集（失敗しても続行）
+            news_context = ""
+            try:
+                all_tickers = list(holdings_map.keys()) + list(watchlist_map.keys())
+                gathered = await self.gemini.gather_stock_news(all_tickers, market, weekly)
+                if gathered:
+                    news_context = gathered
+                    logger.info(f"[{report_name}] News gathered: {len(news_context)} chars")
+            except Exception as e:
+                logger.warning(f"[{report_name}] News gathering failed (continuing without): {e}")
 
-            # 4. Gemini でレポート生成
-            logger.info(f"Generating {report_name} using Gemini...")
-            ai_result = await self.gemini.generate_stock_report(prompt_data)
+            # 3b. プロンプト生成（ニュースコンテキスト付き）
+            if market == "US":
+                prompt_data = prompts.build_us_weekly_prompt(holdings_map, watchlist_map, indices, news_context) if weekly \
+                    else prompts.build_us_daily_prompt(holdings_map, watchlist_map, indices, news_context)
+            else:
+                prompt_data = prompts.build_jp_weekly_prompt(holdings_map, watchlist_map, indices, news_context) if weekly \
+                    else prompts.build_jp_daily_prompt(holdings_map, watchlist_map, indices, news_context)
+
+            # 4. Stage 2: レポート生成（Claude優先 → Geminiフォールバック）
+            if self.claude:
+                try:
+                    logger.info(f"Generating {report_name} using Claude (Stage 2)...")
+                    ai_result = await self.claude.generate_stock_report(prompt_data)
+                except Exception as e:
+                    logger.warning(f"[{report_name}] Claude failed, falling back to Gemini: {e}")
+                    logger.info(f"Generating {report_name} using Gemini (fallback)...")
+                    ai_result = await self.gemini.generate_stock_report(prompt_data)
+            else:
+                logger.info(f"Generating {report_name} using Gemini...")
+                ai_result = await self.gemini.generate_stock_report(prompt_data)
+
             result_text = ai_result.get("text", "")
             if ai_result.get("truncated"):
                 result_text += "\n\n*(※文字数制限により途切れています)*"

@@ -45,6 +45,14 @@ class NewsBot(commands.Bot):
             logger.error(f"Failed to retrieve secrets: {e}")
             raise
 
+        # Anthropic APIキー（任意）— 未設定時はGeminiのみで動作
+        try:
+            self.anthropic_api_key = get_secret("ANTHROPIC_API_KEY_STOCK")
+            logger.info("ANTHROPIC_API_KEY_STOCK loaded (2-stage pipeline available)")
+        except Exception:
+            logger.warning("ANTHROPIC_API_KEY_STOCK not found in Secret Manager, Claude features disabled")
+            self.anthropic_api_key = None
+
     async def setup_hook(self):
         # 起動時にCogを読み込む
         cogs = ["cogs.random_chat", "cogs.chat", "cogs.stock_report"]

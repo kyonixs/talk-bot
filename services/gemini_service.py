@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 # Gemini APIリクエストのタイムアウト（秒）
 _GEMINI_TIMEOUT_STOCK = 120  # 株式レポート（長文生成のため長め）
+_GEMINI_TIMEOUT_NEWS = 60    # ニュース収集（Stage 1）
 _GEMINI_TIMEOUT_CHAT = 30    # 雑談・会話
 _GEMINI_TIMEOUT_ROUTER = 10  # ルーター（短い応答のみ）
 
@@ -106,6 +107,64 @@ class GeminiService:
                     retry_delay *= 2
                 else:
                     raise e
+
+    async def gather_stock_news(self, tickers: list[str], market: str, weekly: bool = False) -> str | None:
+        """
+        Google Search Grounding で銘柄群のニュース・事実情報を収集する（Stage 1）。
+        株式レポート生成前にClaudeへ渡すニュースコンテキストの構築に使用する。
+        分析・推測は含めず、事実情報のみを返す。
+        """
+        if not tickers:
+            return None
+
+        ticker_list = "、".join(tickers[:20])  # 上位20件に制限
+        period = "直近1週間" if weekly else "直近24〜48時間"
+        market_label = "日本株（東証）" if market == "JP" else "米国株（NYSE/NASDAQ）"
+
+        prompt = (
+            f"マーケット: {market_label}\n"
+            f"調査対象銘柄: {ticker_list}\n"
+            f"調査期間: {period}\n\n"
+            "上記の各銘柄について、Google検索で最新情報を調べ、以下の事実情報があれば記載してください:\n"
+            "- 決算・業績発表（EPS・売上・ガイダンスなどの数値）\n"
+            "- アナリスト格付け・目標株価の変更\n"
+            "- 重要な企業イベント（製品発表、M&A、リコール、経営陣変更など）\n"
+            "- 規制・訴訟・政治的リスクに関する発表\n"
+            "- 当該銘柄のセクターに影響するマクロニュース\n\n"
+            "【出力ルール】\n"
+            "- 事実と数値のみを記載。推測・分析・投資判断は含めない\n"
+            "- 各銘柄は「■ TICKER」の見出しで区切る\n"
+            "- 情報が見つからない銘柄はスキップ\n"
+            "- 全体で600〜1000文字程度にまとめる\n"
+            "- 思考プロセスや検索手順は一切出力せず、事実情報のみを直接出力すること\n"
+        )
+
+        try:
+            logger.info(f"[Gemini] Gathering news for {len(tickers)} tickers ({market}, weekly={weekly})")
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[{"google_search": {}}],
+                        temperature=0.1,
+                        max_output_tokens=2048,
+                    )
+                ),
+                timeout=_GEMINI_TIMEOUT_NEWS,
+            )
+
+            text = _extract_text(response)
+            if not text:
+                logger.warning("[Gemini] News gathering returned no text")
+                return None
+
+            logger.info(f"[Gemini] News gathered ({len(text)} chars)")
+            return text
+
+        except Exception as e:
+            logger.error(f"[Gemini] News gathering error: {e}")
+            return None
 
     async def generate_random_chat(self, personality: str, topics: str, trending_context: str = "") -> str | None:
         """

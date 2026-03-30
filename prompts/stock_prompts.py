@@ -65,15 +65,22 @@ def format_stocks_for_prompt(stocks_map: dict, weekly: bool = False) -> str:
 # US Prompts
 # ============================================================
 
-def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> dict:
+def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None, news_context: str = "") -> dict:
     holdings = format_stocks_for_prompt(holdings_map)
     watchlist = format_stocks_for_prompt(watchlist_map)
     indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
+
+    news_instruction = (
+        "# 提供ニュースの活用\n"
+        "「AI収集済みニュース」セクションに各銘柄の事実情報が提供されている場合、\n"
+        "その情報と株価データを組み合わせて「なぜその値動きになったか」を推理・連結すること。\n\n"
+    ) if news_context else ""
 
     system_instruction = (
         "あなたは米国株式市場・マクロ経済に精通した投資アシスタントです。\n"
         "本出力は一般情報であり投資助言ではありません。\n\n"
         + FACT_BASED_INSTRUCTION
+        + news_instruction
         + TONE_INSTRUCTION
         + "# 目的\n"
         "スマホで1〜2分で読める「今日のアラート」を作成する。\n"
@@ -91,24 +98,34 @@ def build_us_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict
         "4. ## ➖ 静かな銘柄（銘柄名と騰落率のみ一行で）"
     )
 
+    news_section = f"\n# AI収集済みニュース（Gemini検索結果）\n{news_context}\n" if news_context else ""
+
     user_prompt = (
         "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ\n" + holdings + "\n\n"
-        "# 注目銘柄データ\n" + watchlist + "\n\n"
+        "# 注目銘柄データ\n" + watchlist
+        + news_section + "\n\n"
         "上記のデータに基づき、本日の日次レポートを作成してください。"
     )
 
     return {"system_instruction": system_instruction, "user_prompt": user_prompt}
 
-def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> dict:
+def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None, news_context: str = "") -> dict:
     holdings = format_stocks_for_prompt(holdings_map, weekly=True)
     watchlist = format_stocks_for_prompt(watchlist_map, weekly=True)
     indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
+
+    news_instruction = (
+        "# 提供ニュースの活用\n"
+        "「AI収集済みニュース」セクションに各銘柄の事実情報が提供されている場合、\n"
+        "その情報と週間騰落率を組み合わせて「なぜその動きになったか」を推理・連結すること。\n\n"
+    ) if news_context else ""
 
     system_instruction = (
         "あなたは米国株式市場・マクロ経済に精通した投資アシスタントです。\n"
         "本出力は一般情報であり投資助言ではありません。\n\n"
         + FACT_BASED_INSTRUCTION
+        + news_instruction
         + TONE_INSTRUCTION
         + "# 目的\n"
         "「週を通じた流れ」を分析し、事実をつないだ考察とアクションプランを導く。\n\n"
@@ -125,10 +142,13 @@ def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dic
         "5. ## 📅 来週のカレンダー"
     )
 
+    news_section = f"\n# AI収集済みニュース（Gemini検索結果）\n{news_context}\n" if news_context else ""
+
     user_prompt = (
         "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ（週間）\n" + holdings + "\n\n"
-        "# 注目銘柄データ（週間）\n" + watchlist + "\n\n"
+        "# 注目銘柄データ（週間）\n" + watchlist
+        + news_section + "\n\n"
         "上記のデータに基づき、今週の週次レポートを作成してください。"
     )
 
@@ -138,15 +158,22 @@ def build_us_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dic
 # JP Prompts
 # ============================================================
 
-def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> dict:
+def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None, news_context: str = "") -> dict:
     holdings = format_stocks_for_prompt(holdings_map)
     watchlist = format_stocks_for_prompt(watchlist_map)
     indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
+
+    news_instruction = (
+        "# 提供ニュースの活用\n"
+        "「AI収集済みニュース」セクションに各銘柄の事実情報が提供されている場合、\n"
+        "その情報と株価データを組み合わせて「なぜその値動きになったか」を推理・連結すること。\n\n"
+    ) if news_context else ""
 
     system_instruction = (
         "あなたは日本株式市場・国内マクロ経済に精通した投資アシスタントです。\n"
         "本出力は一般情報であり投資助言ではありません。\n\n"
         + FACT_BASED_INSTRUCTION
+        + news_instruction
         + TONE_INSTRUCTION
         + "# 目的\n"
         "スマホで1〜2分で読める「今日のアラート」を作成する。\n"
@@ -164,24 +191,34 @@ def build_jp_daily_prompt(holdings_map: dict, watchlist_map: dict, indices: dict
         "4. ## ➖ 静かな銘柄（銘柄名と騰落率のみ一行で）"
     )
 
+    news_section = f"\n# AI収集済みニュース（Gemini検索結果）\n{news_context}\n" if news_context else ""
+
     user_prompt = (
         "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ\n" + holdings + "\n\n"
-        "# 注目銘柄データ\n" + watchlist + "\n\n"
+        "# 注目銘柄データ\n" + watchlist
+        + news_section + "\n\n"
         "上記のデータに基づき、本日の日次レポートを作成してください。"
     )
 
     return {"system_instruction": system_instruction, "user_prompt": user_prompt}
 
-def build_jp_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None) -> dict:
+def build_jp_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dict = None, news_context: str = "") -> dict:
     holdings = format_stocks_for_prompt(holdings_map, weekly=True)
     watchlist = format_stocks_for_prompt(watchlist_map, weekly=True)
     indices_text = format_indices_for_prompt(indices) if indices else "（取得失敗）"
+
+    news_instruction = (
+        "# 提供ニュースの活用\n"
+        "「AI収集済みニュース」セクションに各銘柄の事実情報が提供されている場合、\n"
+        "その情報と週間騰落率を組み合わせて「なぜその動きになったか」を推理・連結すること。\n\n"
+    ) if news_context else ""
 
     system_instruction = (
         "あなたは日本株式市場・国内マクロ経済に精通した投資アシスタントです。\n"
         "本出力は一般情報であり投資助言ではありません。\n\n"
         + FACT_BASED_INSTRUCTION
+        + news_instruction
         + TONE_INSTRUCTION
         + "# 目的\n"
         "「週を通じた流れ」を分析し、事実をつないだ考察とアクションプランを導く。\n\n"
@@ -198,10 +235,13 @@ def build_jp_weekly_prompt(holdings_map: dict, watchlist_map: dict, indices: dic
         "5. ## 📅 来週のカレンダー"
     )
 
+    news_section = f"\n# AI収集済みニュース（Gemini検索結果）\n{news_context}\n" if news_context else ""
+
     user_prompt = (
         "# 主要指数データ\n" + indices_text + "\n\n"
         "# 保有銘柄データ（週間）\n" + holdings + "\n\n"
-        "# 注目銘柄データ（週間）\n" + watchlist + "\n\n"
+        "# 注目銘柄データ（週間）\n" + watchlist
+        + news_section + "\n\n"
         "上記のデータに基づき、今週の週次レポートを作成してください。"
     )
 
