@@ -52,7 +52,7 @@ class GeminiService:
             raise ValueError("API key must be provided to initialize GeminiService.")
 
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-3.1-flash-lite-preview"
+        self.model_name = "gemini-2.5-flash"
         self.router_model_name = "gemini-2.5-flash-lite"  # Router用軽量モデル
 
     async def generate_stock_report(self, prompt_data: dict) -> dict:
