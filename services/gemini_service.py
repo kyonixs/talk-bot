@@ -51,8 +51,8 @@ class GeminiService:
             raise ValueError("API key must be provided to initialize GeminiService.")
 
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-2.5-flash"
-        self.router_model_name = "gemini-2.0-flash-lite"  # Router用軽量モデル
+        self.model_name = "gemini-3.1-flash"
+        self.router_model_name = "gemini-2.5-flash-lite"  # Router用軽量モデル
 
     async def generate_stock_report(self, prompt_data: dict) -> dict:
         """
@@ -152,7 +152,6 @@ class GeminiService:
                         system_instruction=personality,
                         tools=[{"google_search": {}}],
                         temperature=0.8,  # 雑談なので少しクリエイティブに
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     )
                 ),
                 timeout=_GEMINI_TIMEOUT_CHAT,
@@ -214,7 +213,6 @@ class GeminiService:
                             ),
                             tools=[{"google_search": {}}],
                             temperature=0.7,
-                            thinking_config=types.ThinkingConfig(thinking_budget=0),
                         )
                     ),
                     timeout=_GEMINI_TIMEOUT_CHAT,
