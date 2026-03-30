@@ -151,7 +151,8 @@ class GeminiService:
                     config=types.GenerateContentConfig(
                         system_instruction=personality,
                         tools=[{"google_search": {}}],
-                        temperature=0.8  # 雑談なので少しクリエイティブに
+                        temperature=0.8,  # 雑談なので少しクリエイティブに
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     )
                 ),
                 timeout=_GEMINI_TIMEOUT_CHAT,
@@ -212,7 +213,8 @@ class GeminiService:
                                 "- **【重要】思考プロセスや解説、ドラフトなどは一切出力せず、チャットの返答本文のみを直接出力すること。**\n"
                             ),
                             tools=[{"google_search": {}}],
-                            temperature=0.7
+                            temperature=0.7,
+                            thinking_config=types.ThinkingConfig(thinking_budget=0),
                         )
                     ),
                     timeout=_GEMINI_TIMEOUT_CHAT,
