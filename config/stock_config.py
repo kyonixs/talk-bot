@@ -16,6 +16,7 @@ STOCK_CONFIG = {
         # --- 米国株 ---
         "us_daily": {
             "market_close_et": time(16, 0),  # NYSE/NASDAQ 閉場 16:00 ET
+            "offset_minutes": 15,             # 閉場15分後に実行（夏: 05:15 JST / 冬: 06:15 JST）
             "weekdays_only": True,
             "skip_holidays": "US",           # holidays.NYSE() で判定
         },
@@ -27,7 +28,8 @@ STOCK_CONFIG = {
         
         # --- 日本株 ---
         "jp_daily": {
-            "market_close_jst": time(15, 0), # TSE 閉場 15:00 JST
+            "market_close_jst": time(15, 30), # TSE 閉場 15:30 JST
+            "offset_minutes": 15,              # 閉場15分後に実行（15:45）
             "weekdays_only": True,
             "skip_holidays": "JP",           # holidays.JP() で判定
         },

@@ -92,7 +92,7 @@ class StockReportCog(commands.Cog):
 
             if is_ny_weekday and not is_ny_holiday:
                 target_time = get_us_market_close_jst(now)
-                offset = STOCK_CONFIG.get("market_close_offset_minutes", 30)
+                offset = us_daily.get("offset_minutes", STOCK_CONFIG.get("market_close_offset_minutes", 30))
                 target_dt = datetime.combine(now.date(), target_time, tzinfo=TZ_JST)
                 target_dt += timedelta(minutes=offset)
 
@@ -107,7 +107,7 @@ class StockReportCog(commands.Cog):
                 pass
             else:
                 target_time = jp_daily["market_close_jst"]
-                offset = STOCK_CONFIG.get("market_close_offset_minutes", 30)
+                offset = jp_daily.get("offset_minutes", STOCK_CONFIG.get("market_close_offset_minutes", 30))
                 target_dt = datetime.combine(now.date(), target_time, tzinfo=TZ_JST)
                 target_dt += timedelta(minutes=offset)
 
