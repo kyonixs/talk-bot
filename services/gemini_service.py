@@ -52,8 +52,9 @@ class GeminiService:
             raise ValueError("API key must be provided to initialize GeminiService.")
 
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-2.5-flash"
-        self.router_model_name = "gemini-2.5-flash-lite"  # Router用軽量モデル
+        self.model_name = "gemini-3.1-flash-lite-preview"           # ニュース収集・株式レポートフォールバック用
+        self.chat_model_name = "gemini-3.1-flash-lite-preview"   # チャット用
+        self.router_model_name = "gemini-2.5-flash-lite"          # ルーター用軽量モデル
 
     async def generate_stock_report(self, prompt_data: dict) -> dict:
         """
@@ -205,7 +206,7 @@ class GeminiService:
             logger.debug(f"[Gemini] Random chat: topics={topics[:30]}, trending={'あり' if trending_context else 'なし'}")
             response = await asyncio.wait_for(
                 self.client.aio.models.generate_content(
-                    model=self.model_name,
+                    model=self.chat_model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=personality,
@@ -259,7 +260,7 @@ class GeminiService:
                 logger.debug(f"[Gemini] Chat response: history={len(chat_history)} msgs, user_msg={len(user_message)} chars (attempt {attempt + 1}/{max_retries})")
                 response = await asyncio.wait_for(
                     self.client.aio.models.generate_content(
-                        model=self.model_name,
+                        model=self.chat_model_name,
                         contents=contents,
                         config=types.GenerateContentConfig(
                             system_instruction=(
